@@ -1,7 +1,6 @@
-name: Build GoShield Builder
+name: Build GoShield GUI Builder
 
 on:
-  
   workflow_dispatch:
 
 jobs:
@@ -16,17 +15,38 @@ jobs:
     - name: Setup Go Environment
       uses: actions/setup-go@v5
       with:
-        go-version: '1.20' # [关键修改] 强制使用 Go 1.20 编译，保障 Windows 7 兼容性
+        go-version: '1.20' # 严格锁定 1.20，确保最终壳在 Win7 上完美运行
         cache: true
 
-    - name: Build Builder Executable
+    - name: Install UI Dependencies & Prepare Manifest
+      run: |
+        # 自动下载界面库并整理依赖
+        go get github.com/lxn/walk
+        go mod tidy
+        # 安装 rsrc 工具，用于生成 Windows 原生窗口外观的清单文件
+        go install github.com/akavel/rsrc@latest
+        echo '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="Builder" type="win32"/><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/></dependentAssembly></dependency></assembly>' > cmd/builder/builder.manifest
+        rsrc -manifest cmd/builder/builder.manifest -o cmd/builder/rsrc.syso
+
+    - name: Build GUI Builder Executable
       run: |
         mkdir build
-        go build -ldflags "-s -w" -o build/Builder.exe ./cmd/builder
+        # -H=windowsgui 隐藏背后的黑框控制台，让程序变成纯正的 Windows 图形软件
+        go build -ldflags "-s -w -H=windowsgui" -o build/Builder.exe ./cmd/builder
 
-    - name: Upload Builder Artifact
+    - name: Package Release Files
+      run: |
+        # 将界面主程序、核心防御库源码打包在一起，组成完整的“绿色版”工具包
+        mkdir release
+        cp build/Builder.exe release/
+        cp -r internal release/
+        cp -r stub release/
+        cp go.mod release/
+        cp go.sum release/
+
+    - name: Upload GUI Release
       uses: actions/upload-artifact@v4
       with:
-        name: GoShield-Builder
-        path: build/Builder.exe
+        name: GoShield-GUI-Release
+        path: release/
         compression-level: 6
