@@ -2,8 +2,6 @@
 package loader
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
 	"syscall"
 	"unsafe"
