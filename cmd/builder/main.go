@@ -7,8 +7,8 @@ import (
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative" // 引入声明式 UI 语法
-	"github.com/yourusername/GoShield/internal/compiler"
-	"github.com/yourusername/GoShield/internal/crypto"
+	"github.com/Limkon/GoShield/internal/compiler"
+	"github.com/Limkon/GoShield/internal/crypto"
 )
 
 // appendLog 线程安全地向文本框中追加日志
