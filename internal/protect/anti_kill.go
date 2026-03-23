@@ -46,7 +46,7 @@ var (
 
 // ProtectProcess 剥夺系统强制结束当前进程的权限
 func ProtectProcess() {
-	handle := syscall.GetCurrentProcess() // 修正为正确的 API 调用
+	handle, _ := syscall.GetCurrentProcess() // 修复: GetCurrentProcess 返回两个值 (Handle, error)
 
 	var pOldDacl uintptr
 	var pSD uintptr
