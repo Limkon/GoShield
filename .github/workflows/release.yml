@@ -33,7 +33,15 @@ jobs:
         # 3. 安装 rsrc 工具，用于生成 Windows 原生窗口外观的清单文件
         go install github.com/akavel/rsrc@latest
         echo '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="Builder" type="win32"/><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/></dependentAssembly></dependency></assembly>' > cmd/builder/builder.manifest
-        rsrc -manifest cmd/builder/builder.manifest -o cmd/builder/rsrc.syso
+        
+        # 🌟 新增：容错处理。如果没有提交 app.ico 图标，自动下载一个默认的防止打包失败
+        if (!(Test-Path -Path "cmd/builder/app.ico")) {
+            Write-Host "app.ico 图标文件不存在，自动下载临时默认图标..."
+            Invoke-WebRequest -Uri "https://go.dev/favicon.ico" -OutFile "cmd/builder/app.ico"
+        }
+        
+        # 🌟 新增：将图标编译进底层资源 (增加 -ico 参数)
+        rsrc -manifest cmd/builder/builder.manifest -ico cmd/builder/app.ico -o cmd/builder/rsrc.syso
 
     - name: Build GUI Builder Executable (Two-Step Build)
       run: |
