@@ -32,22 +32,23 @@ jobs:
         echo '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="Builder" type="win32"/><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/></dependentAssembly></dependency></assembly>' > cmd/builder/builder.manifest
         rsrc -manifest cmd/builder/builder.manifest -o cmd/builder/rsrc.syso
 
-    - name: Build GUI Builder Executable
+    - name: Build GUI Builder Executable (Two-Step Build)
       run: |
         mkdir build
-        # -ldflags "-s -w"：剥离调试信息和符号表，极致压缩体积
-        # -H=windowsgui：隐藏黑框控制台，作为纯正 Windows 图形软件运行
-        go build -ldflags "-s -w -H=windowsgui" -o build/Builder.exe ./cmd/builder
+        
+        # 第一步：预编译基础外壳 (Stub Base)
+        # 将编译产物输出到 internal/compiler/ 目录，以便后续的 go:embed 指令能抓取到它
+        go build -ldflags "-s -w -H=windowsgui" -o internal/compiler/stub_base.exe ./stub
+        
+        # 第二步：编译完全独立的加壳机主程序 (Builder)
+        # 此时编译器会自动把刚生成的 stub_base.exe 转换为字节流打包进 Builder 中
+        go build -ldflags "-s -w -H=windowsgui" -o build/Builder_Standalone.exe ./cmd/builder
 
     - name: Package Release Files
       run: |
-        # 将界面主程序和运行时需要的核心防御源码打包在一起，组成“绿色版”工具包
+        # 架构重构红利：现在只需要发布这一个独立的 .exe 文件即可！
         mkdir release
-        cp build/Builder.exe release/
-        cp -r internal release/
-        cp -r stub release/
-        cp go.mod release/
-        cp go.sum release/
+        cp build/Builder_Standalone.exe release/
 
     - name: Upload GUI Release
       uses: actions/upload-artifact@v4
