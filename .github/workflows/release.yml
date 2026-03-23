@@ -2,7 +2,7 @@ name: Build GoShield Builder
 
 on:
   
-  workflow_dispatch: # 允许在 GitHub Actions 页面手动点击运行
+  workflow_dispatch:
 
 jobs:
   build-windows:
@@ -16,13 +16,12 @@ jobs:
     - name: Setup Go Environment
       uses: actions/setup-go@v5
       with:
-        go-version: '1.21'
-        cache: true # 启用 Go 模块缓存，加速二次编译
+        go-version: '1.20' # [关键修改] 强制使用 Go 1.20 编译，保障 Windows 7 兼容性
+        cache: true
 
     - name: Build Builder Executable
       run: |
         mkdir build
-        # 编译 Builder，并使用 -ldflags "-s -w" 剥离调试信息以大幅减小体积
         go build -ldflags "-s -w" -o build/Builder.exe ./cmd/builder
 
     - name: Upload Builder Artifact
