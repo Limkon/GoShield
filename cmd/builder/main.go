@@ -121,7 +121,7 @@ func main() {
 							return
 						}
 
-						appendLog(logTE, "[*] 正在拉起 Go 编译器植入底层防御壳 (需要几秒，请稍候)...")
+						appendLog(logTE, "[*] 正在执行 Overlay 注入并拼装预编译防御壳 (极速)...")
 						mw.Synchronize(func() { pb.SetValue(80) })
 						
 						err = compiler.BuildProtectedExe(ciphertext, key, outFile)
