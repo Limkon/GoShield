@@ -28,7 +28,7 @@ func main() {
 	err := MainWindow{
 		AssignTo: &mw,
 		Title:    "GoShield - 终极 EXE 保护加壳系统",
-		Icon:     "app.ico", // 🌟 新增：绑定窗口与任务栏图标，系统会自动从嵌入资源或同级目录加载
+		// 🌟 修改点：删除了 Icon: "app.ico", 这一行
 		MinSize:  Size{Width: 550, Height: 400},
 		Layout:   VBox{},
 		Children: []Widget{
