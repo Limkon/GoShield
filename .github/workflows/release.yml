@@ -20,6 +20,9 @@ jobs:
 
     - name: Install UI Dependencies & Prepare Manifest
       run: |
+        # 0. 提前创建一个空占位文件，解决 go mod tidy 解析项目包时 go:embed 找不到目标文件报错的问题
+        New-Item -ItemType File -Force -Path internal/compiler/stub_base.exe
+        
         # 1. 强制降级并锁定底层 sys 库为兼容 Go 1.20 的老版本，解决编译冲突
         go get golang.org/x/sys@v0.18.0
         
@@ -37,11 +40,11 @@ jobs:
         mkdir build
         
         # 第一步：预编译基础外壳 (Stub Base)
-        # 将编译产物输出到 internal/compiler/ 目录，以便后续的 go:embed 指令能抓取到它
+        # 将编译产物输出到 internal/compiler/ 目录，覆盖之前的空占位文件
         go build -ldflags "-s -w -H=windowsgui" -o internal/compiler/stub_base.exe ./stub
         
         # 第二步：编译完全独立的加壳机主程序 (Builder)
-        # 此时编译器会自动把刚生成的 stub_base.exe 转换为字节流打包进 Builder 中
+        # 此时编译器会自动把刚生成的真实的 stub_base.exe 转换为字节流打包进 Builder 中
         go build -ldflags "-s -w -H=windowsgui" -o build/Builder_Standalone.exe ./cmd/builder
 
     - name: Package Release Files
