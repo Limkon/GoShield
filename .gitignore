@@ -1,0 +1,22 @@
+# 编译生成的二进制文件
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+build/
+bin/
+
+# Go 测试与覆盖率文件
+*.test
+*.out
+
+# 本地工作区与依赖环境
+go.work
+vendor/
+
+# OS 与 IDE 缓存
+.idea/
+.vscode/
+*.swp
+.DS_Store
