@@ -28,7 +28,6 @@ func main() {
 	err := MainWindow{
 		AssignTo: &mw,
 		Title:    "GoShield - 终极 EXE 保护加壳系统",
-		// 🌟 修改点：删除了 Icon: "app.ico", 这一行
 		MinSize:  Size{Width: 550, Height: 400},
 		Layout:   VBox{},
 		Children: []Widget{
@@ -122,10 +121,11 @@ func main() {
 							return
 						}
 
-						appendLog(logTE, "[*] 正在执行 Overlay 注入并拼装预编译防御壳 (极速)...")
+						appendLog(logTE, "[*] 正在执行无损图标注入与预编译壳拼接...")
 						mw.Synchronize(func() { pb.SetValue(80) })
 						
-						err = compiler.BuildProtectedExe(ciphertext, key, outFile)
+						// 👇 关键修复点：这里传入了 inFile 作为第一个参数
+						err = compiler.BuildProtectedExe(inFile, ciphertext, key, outFile)
 						if err != nil {
 							appendLog(logTE, fmt.Sprintf("[-] 编译失败: %v", err))
 							return
@@ -135,7 +135,7 @@ func main() {
 						appendLog(logTE, fmt.Sprintf("[+] 加壳成功！\r\n[+] 带壳程序已安全保存至: %s", outFile))
 						
 						mw.Synchronize(func() {
-							walk.MsgBox(mw, "成功", "程序加壳与底层保护植入完成！\n您现在可以测试运行了。", walk.MsgBoxIconInformation)
+							walk.MsgBox(mw, "成功", "程序加壳与底层保护植入完成！\n原程序图标已完美继承，您可以测试运行了。", walk.MsgBoxIconInformation)
 						})
 					}()
 				},
