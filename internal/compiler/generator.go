@@ -2,44 +2,54 @@
 package compiler
 
 import (
+	_ "embed"
+	"encoding/binary"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 )
 
-// BuildProtectedExe 核心构建调度
+//go:embed stub_base.exe
+var stubBase []byte
+
+// BuildProtectedExe 核心构建调度 (Overlay 附加注入模式)
 func BuildProtectedExe(encryptedData []byte, key []byte, outputExe string) error {
-	stubDir := "./stub"
-	payloadFile := filepath.Join(stubDir, "payload.go")
-
-	// 1. 将加密数据和密钥格式化为 Go 源码文件
-	// 使用 %#v 语法可以直接将 byte 切片格式化为合法的 Go 数组字面量
-	payloadCode := fmt.Sprintf(`package main
-
-var EncryptionKey = %#v
-var EncryptedPayload = %#v
-`, key, encryptedData)
-
-	// 2. 写入 payload.go 到 stub 目录
-	err := os.WriteFile(payloadFile, []byte(payloadCode), 0644)
+	// 1. 创建输出文件
+	file, err := os.OpenFile(outputExe, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
-		return fmt.Errorf("failed to write payload.go: %v", err)
+		return fmt.Errorf("无法创建输出文件: %v", err)
+	}
+	defer file.Close()
+
+	// 2. 写入预编译的基础外壳代码 (stub_base.exe)
+	if _, err := file.Write(stubBase); err != nil {
+		return fmt.Errorf("写入外壳基础失败: %v", err)
 	}
 
-	// 确保编译结束后清理生成的临时源码，防止密钥泄露
-	defer os.Remove(payloadFile)
+	// 3. 附加写入加密的 Payload
+	if _, err := file.Write(encryptedData); err != nil {
+		return fmt.Errorf("写入加密核心失败: %v", err)
+	}
 
-	// 3. 调用 go build 编译 Stub 目录
-	// -s -w：剥离符号表和调试信息，防逆向且极大减小体积
-	// -H=windowsgui：隐藏黑框控制台窗口
-	cmd := exec.Command("go", "build", "-ldflags", "-s -w -H=windowsgui", "-o", outputExe, stubDir)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// 4. 附加写入 32 字节的 AES 密钥
+	if len(key) != 32 {
+		return fmt.Errorf("密钥长度异常，必须为 32 字节")
+	}
+	if _, err := file.Write(key); err != nil {
+		return fmt.Errorf("写入密钥失败: %v", err)
+	}
 
-	err = cmd.Run()
-	if err != nil {
-		return fmt.Errorf("go build failed: %v", err)
+	// 5. 附加写入 Payload 长度 (转换为 8 字节的小端序 uint64)
+	payloadSize := uint64(len(encryptedData))
+	sizeBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(sizeBuf, payloadSize)
+	if _, err := file.Write(sizeBuf); err != nil {
+		return fmt.Errorf("写入长度信息失败: %v", err)
+	}
+
+	// 6. 附加写入特征码 (8 字节 Magic Bytes)
+	magic := []byte("GOSHIELD")
+	if _, err := file.Write(magic); err != nil {
+		return fmt.Errorf("写入特征码失败: %v", err)
 	}
 
 	return nil
