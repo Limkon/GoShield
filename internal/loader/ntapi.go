@@ -15,6 +15,7 @@ var (
 	procGetThreadContext         = kernel32.NewProc("GetThreadContext")
 	procSetThreadContext         = kernel32.NewProc("SetThreadContext")
 	procResumeThread             = kernel32.NewProc("ResumeThread")
+	procWaitForSingleObject      = kernel32.NewProc("WaitForSingleObject") // 🌟 新增：用于等待进程结束
 	procNtQueryInformationProcess = ntdll.NewProc("NtQueryInformationProcess")
 	procNtUnmapViewOfSection     = ntdll.NewProc("NtUnmapViewOfSection")
 )
