@@ -1,7 +1,7 @@
 name: Build GoShield GUI Builder
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 允许在 Actions 页面手动触发运行
 
 jobs:
   build-windows:
@@ -20,10 +20,14 @@ jobs:
 
     - name: Install UI Dependencies & Prepare Manifest
       run: |
-        # 自动下载界面库并整理依赖
+        # 1. 强制降级并锁定底层 sys 库为兼容 Go 1.20 的老版本，解决编译冲突
+        go get golang.org/x/sys@v0.18.0
+        
+        # 2. 下载 walk UI 库并整理依赖
         go get github.com/lxn/walk
         go mod tidy
-        # 安装 rsrc 工具，用于生成 Windows 原生窗口外观的清单文件
+        
+        # 3. 安装 rsrc 工具，用于生成 Windows 原生窗口外观的清单文件
         go install github.com/akavel/rsrc@latest
         echo '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="Builder" type="win32"/><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/></dependentAssembly></dependency></assembly>' > cmd/builder/builder.manifest
         rsrc -manifest cmd/builder/builder.manifest -o cmd/builder/rsrc.syso
@@ -31,12 +35,13 @@ jobs:
     - name: Build GUI Builder Executable
       run: |
         mkdir build
-        # -H=windowsgui 隐藏背后的黑框控制台，让程序变成纯正的 Windows 图形软件
+        # -ldflags "-s -w"：剥离调试信息和符号表，极致压缩体积
+        # -H=windowsgui：隐藏黑框控制台，作为纯正 Windows 图形软件运行
         go build -ldflags "-s -w -H=windowsgui" -o build/Builder.exe ./cmd/builder
 
     - name: Package Release Files
       run: |
-        # 将界面主程序、核心防御库源码打包在一起，组成完整的“绿色版”工具包
+        # 将界面主程序和运行时需要的核心防御源码打包在一起，组成“绿色版”工具包
         mkdir release
         cp build/Builder.exe release/
         cp -r internal release/
