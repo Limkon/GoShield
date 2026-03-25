@@ -24,9 +24,24 @@ import (
 )
 
 var (
-	user32           = syscall.NewLazyDLL("user32.dll")
-	procPeekMessageW = user32.NewProc("PeekMessageW")
-	procMessageBoxW  = user32.NewProc("MessageBoxW")
+	kernel32                      = syscall.NewLazyDLL("kernel32.dll")
+	procOpenProcess               = kernel32.NewProc("OpenProcess")
+	procCloseHandle               = kernel32.NewProc("CloseHandle")
+	procTerminateProcess          = kernel32.NewProc("TerminateProcess")
+	procGetCurrentThreadId        = kernel32.NewProc("GetCurrentThreadId")
+
+	user32                        = syscall.NewLazyDLL("user32.dll")
+	procPeekMessageW              = user32.NewProc("PeekMessageW")
+	procMessageBoxW               = user32.NewProc("MessageBoxW")
+	procEnumWindows               = user32.NewProc("EnumWindows")
+	procGetWindowThreadProcessId  = user32.NewProc("GetWindowThreadProcessId")
+	procIsWindowVisible           = user32.NewProc("IsWindowVisible")
+	procSetWinEventHook           = user32.NewProc("SetWinEventHook")
+	procUnhookWinEvent            = user32.NewProc("UnhookWinEvent")
+	procMsgWaitForMultipleObjects = user32.NewProc("MsgWaitForMultipleObjects")
+	procPostThreadMessageW        = user32.NewProc("PostThreadMessageW")
+	procTranslateMessage          = user32.NewProc("TranslateMessage")
+	procDispatchMessageW          = user32.NewProc("DispatchMessageW")
 )
 
 type MSG struct {
@@ -49,7 +64,24 @@ func showErrorBox(msg string) {
 	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(msgPtr)), uintptr(unsafe.Pointer(titlePtr)), 0x10)
 }
 
-// 终极纯原生 GUI：使用项目内置的 walk 库绘制密码窗口
+func hasVisibleWindow(pid uint32) bool {
+	var found bool
+	cb := syscall.NewCallback(func(hwnd syscall.Handle, lParam uintptr) uintptr {
+		var wpid uint32
+		procGetWindowThreadProcessId.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&wpid)))
+		if wpid == pid {
+			vis, _, _ := procIsWindowVisible.Call(uintptr(hwnd))
+			if vis != 0 {
+				found = true
+				return 0 
+			}
+		}
+		return 1 
+	})
+	procEnumWindows.Call(cb, 0)
+	return found
+}
+
 func askPassword() string {
 	var dlg *walk.Dialog
 	var pwdTE *walk.LineEdit
@@ -82,11 +114,10 @@ func askPassword() string {
 	return pwd
 }
 
-// 🌟 修复：不再通过 os.Open 读取文件，而是通过环境变量获取哈希，避免与 LockFile 发生读写死锁冲突
 func verifyExitPassword() bool {
 	hashHex := os.Getenv("GOSHIELD_EXIT_HASH")
 	if hashHex == "" {
-		return true // 无密码要求
+		return true 
 	}
 
 	exitVerifyHash, err := hex.DecodeString(hashHex)
@@ -178,7 +209,6 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 		return nil, fmt.Errorf("size error")
 	}
 
-	// 🌟 将退出密码验证器存入环境变量，供后续保镖和退出 UI 校验使用
 	isExitZero := true
 	for _, b := range exitVerifyHash {
 		if b != 0 {
@@ -288,7 +318,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 🌟 新增拦截层：如果环境变量被设置，说明这是保镖唤起的专用 UI 进程
 	if os.Getenv("GOSHIELD_SHOW_EXIT_UI") == "1" {
 		if verifyExitPassword() {
 			os.Exit(0)
@@ -304,40 +333,93 @@ func main() {
 
 		targetPID, _ := strconv.Atoi(shadowPIDStr)
 		
-		kernel32 := syscall.NewLazyDLL("kernel32.dll")
-		procOpenProcess := kernel32.NewProc("OpenProcess")
-		procWaitForSingleObject := kernel32.NewProc("WaitForSingleObject")
-		procCloseHandle := kernel32.NewProc("CloseHandle")
+		const accessRight = 0x00100000 | 0x0400 | 0x0001
+		
+		// 🌟 获取当前保镖主线程 ID，用于接收事件唤醒信号
+		tidPtr, _, _ := procGetCurrentThreadId.Call()
+		mainThreadId := uint32(tidPtr)
+
+		// 🌟 注册原生的钩子回调函数（0 CPU 占用，全靠系统硬件事件触发）
+		winEventCb := syscall.NewCallback(func(hWinEventHook syscall.Handle, event uint32, hwnd syscall.Handle, idObject int32, idChild int32, idEventThread uint32, dwmsEventTime uint32) uintptr {
+			if idObject == 0 { // 确认是窗口事件 (OBJID_WINDOW)
+				// 发送自定义唤醒信号 (WM_APP = 0x8000) 到我们的主线程，打断无限挂起状态
+				procPostThreadMessageW.Call(uintptr(mainThreadId), 0x8000, 0, 0)
+			}
+			return 0
+		})
 
 		for {
-			hProcess, _, _ := procOpenProcess.Call(0x00100000|0x0400, 0, uintptr(targetPID))
+			hProcess, _, _ := procOpenProcess.Call(uintptr(accessRight), 0, uintptr(targetPID))
 			if hProcess != 0 {
-				procWaitForSingleObject.Call(hProcess, 0xFFFFFFFF)
-				procCloseHandle.Call(hProcess)
+				windowAppeared := false
+
+				// 🌟 极限操作：监控目标 PID 的 0x8001(销毁) 到 0x8003(隐藏) 的事件
+				// 这里利用了操作系统的底层无感事件订阅
+				hook, _, _ := procSetWinEventHook.Call(
+					0x8001, 0x8003, 
+					0, winEventCb, uintptr(targetPID), 0, 0) // WINEVENT_OUTOFCONTEXT
+
+				for {
+					// 🌟 绝对 0 轮询：阻塞当前线程直到 hProcess 死亡，或者收到刚才我们设定的唤醒事件 (QS_ALLEVENTS = 0x04BF)
+					// 这期间线程处于内核态深度休眠，完全不消耗 CPU 资源。
+					res, _, _ := procMsgWaitForMultipleObjects.Call(1, uintptr(unsafe.Pointer(&hProcess)), 0, 0xFFFFFFFF, 0x04BF)
+					if res == 0 {
+						break // 进程被强制物理销毁，结束监控
+					}
+
+					// 清理系统通过事件驱动发送给我们的队列消息，否则会阻塞下次唤醒
+					var msg MSG
+					for {
+						hasMsg, _, _ := procPeekMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0, 1) // PM_REMOVE
+						if hasMsg == 0 {
+							break
+						}
+						procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
+						procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
+					}
+
+					// 唤醒后，仅执行这一次状态校验
+					hasVis := hasVisibleWindow(uint32(targetPID))
+					if hasVis {
+						windowAppeared = true
+					} else if windowAppeared {
+						// 一旦发现曾经出现的窗口消失了，说明目标正在退出！瞬间打破死锁！
+						break
+					}
+				}
+
+				if hook != 0 {
+					procUnhookWinEvent.Call(hook)
+				}
 			} else {
-				// 防御：进程可能被强制秒退或 PID 异常，必须 Sleep 阻断无限循环空转
-				time.Sleep(1 * time.Second)
+				time.Sleep(500 * time.Millisecond) // 防止异常防空转兜底
 			}
 
-			// 🌟 核心修复：通过安全唤起外部带清单（Manifest）的原程序来绘制 UI 拦截窗口
+			// 拦截时刻：安全唤起外部带清单（Manifest）的原程序绘制 UI 拦截窗口
 			exitUIPassed := false
 			hashHex := os.Getenv("GOSHIELD_EXIT_HASH")
 			if hashHex == "" {
-				exitUIPassed = true // 无退出密码拦截
+				exitUIPassed = true
 			} else {
 				cmd := exec.Command(originalExe)
 				cmd.Env = append(os.Environ(), "GOSHIELD_SHOW_EXIT_UI=1")
-				err := cmd.Run() // 阻塞等待用户输入
+				err := cmd.Run()
 				if err == nil {
-					exitUIPassed = true // 退出码为 0 代表验证成功
+					exitUIPassed = true
 				}
 			}
 
-			if exitUIPassed {
-				break
+			if hProcess != 0 {
+				// 战术斩杀：毫不留情地切断依然在后台磨叽的主进程残留线程，杜绝文件抢占
+				procTerminateProcess.Call(hProcess, 0)
+				procCloseHandle.Call(hProcess)
 			}
 
-			// 验证失败或点击取消，程序直接复活
+			if exitUIPassed {
+				break 
+			}
+
+			// 密码错误：执行瞬发复活逻辑
 			decryptedPayload, err := extractAndDecrypt(originalExe)
 			if err != nil {
 				break
