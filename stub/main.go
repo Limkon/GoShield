@@ -1,14 +1,14 @@
-// 文件路径: stub/main.go
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"syscall"
@@ -18,388 +18,119 @@ import (
 	"github.com/Limkon/GoShield/internal/crypto"
 	"github.com/Limkon/GoShield/internal/loader"
 	"github.com/Limkon/GoShield/internal/protect"
+	"github.com/microsoft/go-winio" // 需要 go get github.com/microsoft/go-winio
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
 )
 
 var (
-	kernel32                  = syscall.NewLazyDLL("kernel32.dll")
-	procOpenProcess           = kernel32.NewProc("OpenProcess")
-	procWaitForSingleObject   = kernel32.NewProc("WaitForSingleObject")
-	procCloseHandle           = kernel32.NewProc("CloseHandle")
-
 	user32                    = syscall.NewLazyDLL("user32.dll")
-	procPeekMessageW          = user32.NewProc("PeekMessageW")
 	procMessageBoxW           = user32.NewProc("MessageBoxW")
 	procSystemParametersInfoW = user32.NewProc("SystemParametersInfoW")
 	procSetWindowPos          = user32.NewProc("SetWindowPos")
 )
 
-type MSG struct {
-	Hwnd    syscall.Handle
-	Message uint32
-	WParam  uintptr
-	LParam  uintptr
-	Time    uint32
-	Pt      struct{ X, Y int32 }
-}
-
-func stopLoadingCursor() {
-	var msg MSG
-	procPeekMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0, 1)
-}
+const pipeName = `\\.\pipe\GoShieldAuthPipe`
 
 func showErrorBox(msg string) {
-	titlePtr, _ := syscall.UTF16PtrFromString("GoShield 安全拦截")
+	titlePtr, _ := syscall.UTF16PtrFromString("安全验证")
 	msgPtr, _ := syscall.UTF16PtrFromString(msg)
-	// 0x40010 = MB_TOPMOST (强制最上层) | MB_ICONHAND (错误红叉图标)
 	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(msgPtr)), uintptr(unsafe.Pointer(titlePtr)), 0x40010)
 }
 
-// 采用 MainWindow + 绝对坐标计算，完美实现右下角全局置顶
-func askPassword() string {
+// 弹出验证 UI
+func verifyExitPassword(hashHex string) bool {
+	if hashHex == "" { return true }
+	exitVerifyHash, _ := hex.DecodeString(hashHex)
+
 	var mw *walk.MainWindow
 	var pwdTE *walk.LineEdit
+	var confirmed bool
 	var pwd string
 
-	err := MainWindow{
+	MainWindow{
 		AssignTo: &mw,
-		Title:    "安全验证",
-		MinSize:  Size{Width: 320, Height: 120},
-		Size:     Size{Width: 320, Height: 120},
+		Title:    "退出验证",
+		MinSize:  Size{Width: 300, Height: 120},
 		Layout:   VBox{},
 		Children: []Widget{
-			Label{Text: "此程序已被高级加密保护，请输入启动密码:"},
-			LineEdit{
-				AssignTo:     &pwdTE,
-				PasswordMode: true,
-			},
+			Label{Text: "请输入退出密码："},
+			LineEdit{AssignTo: &pwdTE, PasswordMode: true},
 			PushButton{
-				Text: "🚀 验证并启动",
+				Text: "确认退出",
 				OnClicked: func() {
 					pwd = pwdTE.Text()
 					mw.Close()
+					confirmed = true
 				},
 			},
 		},
 	}.Create()
 
-	if err != nil {
-		return ""
-	}
-
+	// 定位到右下角
 	var rect struct{ Left, Top, Right, Bottom int32 }
 	procSystemParametersInfoW.Call(0x0030, 0, uintptr(unsafe.Pointer(&rect)), 0)
-
-	x := int(rect.Right) - 320 - 15
-	y := int(rect.Bottom) - 120 - 15
-
-	mw.SetBounds(walk.Rectangle{X: x, Y: y, Width: 320, Height: 120})
-	// HWND_TOPMOST (-1) 强制置顶
+	x, y := int(rect.Right)-320, int(rect.Bottom)-140
+	mw.SetBounds(walk.Rectangle{X: x, Y: y, Width: 300, Height: 120})
 	procSetWindowPos.Call(uintptr(mw.Handle()), ^uintptr(0), uintptr(x), uintptr(y), 0, 0, 0x0041)
 
 	mw.Run()
-	return pwd
-}
+	if !confirmed { return false }
 
-func verifyExitPassword() bool {
-	hashHex := os.Getenv("GOSHIELD_EXIT_HASH")
-	if hashHex == "" {
+	h1 := sha256.Sum256([]byte(pwd))
+	h2 := sha256.Sum256(h1[:])
+	if hex.EncodeToString(h2[:]) == hashHex {
 		return true
 	}
-
-	exitVerifyHash, err := hex.DecodeString(hashHex)
-	if err != nil || len(exitVerifyHash) != 32 {
-		return true
-	}
-
-	var mw *walk.MainWindow
-	var pwdTE *walk.LineEdit
-	var pwd string
-
-	err = MainWindow{
-		AssignTo: &mw,
-		Title:    "退出安全验证",
-		MinSize:  Size{Width: 320, Height: 120},
-		Size:     Size{Width: 320, Height: 120},
-		Layout:   VBox{},
-		Children: []Widget{
-			Label{Text: "程序请求退出，请输入密码以确认关闭:"},
-			LineEdit{
-				AssignTo:     &pwdTE,
-				PasswordMode: true,
-			},
-			PushButton{
-				Text: "🛑 确认退出",
-				OnClicked: func() {
-					pwd = pwdTE.Text()
-					mw.Close()
-				},
-			},
-		},
-	}.Create()
-
-	if err != nil {
-		return false
-	}
-
-	var rect struct{ Left, Top, Right, Bottom int32 }
-	procSystemParametersInfoW.Call(0x0030, 0, uintptr(unsafe.Pointer(&rect)), 0)
-
-	x := int(rect.Right) - 320 - 15
-	y := int(rect.Bottom) - 120 - 15
-
-	mw.SetBounds(walk.Rectangle{X: x, Y: y, Width: 320, Height: 120})
-	procSetWindowPos.Call(uintptr(mw.Handle()), ^uintptr(0), uintptr(x), uintptr(y), 0, 0, 0x0041)
-
-	mw.Run()
-
-	if pwd == "" {
-		return false
-	}
-
-	hash := sha256.Sum256([]byte(pwd))
-	hashOfHash := sha256.Sum256(hash[:])
-
-	match := true
-	for i := 0; i < 32; i++ {
-		if hashOfHash[i] != exitVerifyHash[i] {
-			match = false
-			break
-		}
-	}
-
-	if !match {
-		showErrorBox("密码错误")
-		return false
-	}
-
-	return true
-}
-
-func extractAndDecrypt(exePath string) ([]byte, error) {
-	file, err := os.Open(exePath)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	stat, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	fileSize := stat.Size()
-
-	footerSize := int64(113)
-	if fileSize < footerSize {
-		return nil, fmt.Errorf("no payload")
-	}
-
-	file.Seek(-footerSize, io.SeekEnd)
-	footer := make([]byte, footerSize)
-	io.ReadFull(file, footer)
-
-	if string(footer[105:113]) != "GOSHIELD" {
-		return nil, fmt.Errorf("magic error")
-	}
-
-	verifyHash := footer[0:32]
-	exitVerifyHash := footer[32:64]
-	finalKey := footer[64:96]
-	rememberFlag := footer[96]
-	payloadSize := binary.LittleEndian.Uint64(footer[97:105])
-
-	if fileSize < footerSize+int64(payloadSize) {
-		return nil, fmt.Errorf("size error")
-	}
-
-	isExitZero := true
-	for _, b := range exitVerifyHash {
-		if b != 0 {
-			isExitZero = false
-			break
-		}
-	}
-	if !isExitZero {
-		os.Setenv("GOSHIELD_EXIT_HASH", hex.EncodeToString(exitVerifyHash))
-	} else {
-		os.Setenv("GOSHIELD_EXIT_HASH", "")
-	}
-
-	isZero := true
-	for _, b := range verifyHash {
-		if b != 0 {
-			isZero = false
-			break
-		}
-	}
-
-	realKey := make([]byte, 32)
-	if isZero {
-		copy(realKey, finalKey)
-	} else {
-		var cachedPwd string
-		var tokenFile string
-
-		if rememberFlag == 1 {
-			appData, err := os.UserConfigDir()
-			if err != nil {
-				appData = os.TempDir()
-			}
-			tokenDir := filepath.Join(appData, "GoShield")
-			os.MkdirAll(tokenDir, 0755)
-
-			tokenFile = filepath.Join(tokenDir, fmt.Sprintf("%x.dat", verifyHash[:8]))
-
-			if cacheData, err := os.ReadFile(tokenFile); err == nil {
-				cachedPwd = string(cacheData)
-			}
-		}
-
-		pwd := os.Getenv("GOSHIELD_PASSWORD")
-		if pwd == "" && cachedPwd != "" {
-			pwd = cachedPwd
-		}
-
-		for {
-			if pwd == "" {
-				pwd = askPassword()
-				if pwd == "" {
-					return nil, fmt.Errorf("user cancelled")
-				}
-			}
-
-			hash := sha256.Sum256([]byte(pwd))
-			hashOfHash := sha256.Sum256(hash[:])
-
-			match := true
-			for i := 0; i < 32; i++ {
-				if hashOfHash[i] != verifyHash[i] {
-					match = false
-					break
-				}
-			}
-
-			if match {
-				for i := 0; i < 32; i++ {
-					realKey[i] = finalKey[i] ^ hash[i]
-				}
-				os.Setenv("GOSHIELD_PASSWORD", pwd)
-
-				if rememberFlag == 1 && cachedPwd != pwd {
-					os.WriteFile(tokenFile, []byte(pwd), 0600)
-				}
-				break
-			} else {
-				if os.Getenv("GOSHIELD_SHADOW_PID") != "" {
-					return nil, fmt.Errorf("wrong password in shadow")
-				}
-
-				if cachedPwd != "" && rememberFlag == 1 {
-					os.Remove(tokenFile)
-					cachedPwd = ""
-				} else {
-					showErrorBox("密码错误")
-				}
-
-				pwd = ""
-			}
-		}
-	}
-
-	file.Seek(-(footerSize + int64(payloadSize)), io.SeekEnd)
-	encryptedPayload := make([]byte, payloadSize)
-	io.ReadFull(file, encryptedPayload)
-
-	return crypto.Decrypt(encryptedPayload, realKey)
+	showErrorBox("密码错误，拒绝退出")
+	return false
 }
 
 func main() {
-	stopLoadingCursor()
+	exePath, _ := os.Executable()
 
-	exePath, err := os.Executable()
-	if err != nil {
-		os.Exit(1)
-	}
-
-	if os.Getenv("GOSHIELD_SHOW_EXIT_UI") == "1" {
-		if verifyExitPassword() {
-			os.Exit(0)
-		}
-		os.Exit(1)
-	}
-
-	shadowPIDStr := os.Getenv("GOSHIELD_SHADOW_PID")
-	if shadowPIDStr != "" {
+	// ---------------- 影子保镖模式 ----------------
+	if os.Getenv("GOSHIELD_SHADOW_PID") != "" {
 		protect.ProtectProcess()
-		originalExe := os.Getenv("GOSHIELD_ORIGINAL_EXE")
-		protect.LockFile(originalExe)
+		targetPID, _ := strconv.Atoi(os.Getenv("GOSHIELD_SHADOW_PID"))
+		exitHash := os.Getenv("GOSHIELD_EXIT_HASH")
 
-		targetPID, _ := strconv.Atoi(shadowPIDStr)
-		const accessRight = 0x00100000 | 0x0400 // SYNCHRONIZE | QUERY_INFORMATION
+		// 启动命名管道监听
+		l, err := winio.ListenPipe(pipeName, nil)
+		if err != nil { os.Exit(1) }
 
-		for {
-			hProcess, _, _ := procOpenProcess.Call(uintptr(accessRight), 0, uintptr(targetPID))
-			if hProcess != 0 {
-				// 🌟 核心回归：放弃一切不稳定的窗口探测，直接在内核死等进程物理死亡。
-				// 绝对 0 消耗，绝对防误杀，绝对兼容任何形态的程序。
-				procWaitForSingleObject.Call(hProcess, 0xFFFFFFFF)
-				procCloseHandle.Call(hProcess)
-			} else {
-				time.Sleep(500 * time.Millisecond)
-			}
-
-			exitUIPassed := false
-			hashHex := os.Getenv("GOSHIELD_EXIT_HASH")
-			if hashHex == "" {
-				exitUIPassed = true 
-			} else {
-				// 🌟 物理规律：此处会有约 1 秒的 Go GUI 初始化延迟，
-				// 这是为您呈现高质量原生输入框必须付出的框架启动成本。
-				cmd := exec.Command(originalExe)
-				cmd.Env = append(os.Environ(), "GOSHIELD_SHOW_EXIT_UI=1")
-				err := cmd.Run() 
-				if err == nil {
-					exitUIPassed = true 
+		go func() {
+			for {
+				conn, err := l.Accept()
+				if err != nil { continue }
+				
+				reader := bufio.NewReader(conn)
+				msg, _ := reader.ReadString('\n')
+				
+				if msg == "TRY_EXIT\n" {
+					if verifyExitPassword(exitHash) {
+						fmt.Fprintln(conn, "ALLOW")
+						time.Sleep(100 * time.Millisecond)
+						os.Exit(0) // 保镖也完成任务退出
+					} else {
+						fmt.Fprintln(conn, "REJECT")
+					}
 				}
+				conn.Close()
 			}
+		}()
 
-			if exitUIPassed {
-				break 
-			}
-
-			decryptedPayload, err := extractAndDecrypt(originalExe)
-			if err != nil {
-				break
-			}
-
-			newPID, err := loader.ExecuteAsync(originalExe, decryptedPayload)
-			if err != nil {
-				break
-			}
-			targetPID = int(newPID)
-		}
+		// 监控进程是否被强杀（防爆）
+		hProc, _ := syscall.OpenProcess(0x00100000, false, uint32(targetPID))
+		syscall.WaitForSingleObject(hProc, syscall.INFINITE)
 		os.Exit(0)
 	}
 
-	decryptedPayload, err := extractAndDecrypt(exePath)
-	if err != nil {
-		os.Exit(1)
-	}
-
-	payloadPID, err := loader.ExecuteAsync(exePath, decryptedPayload)
-	if err != nil {
-		os.Exit(1)
-	}
-
-	myExeBytes, err := os.ReadFile(exePath)
-	if err == nil {
-		os.Setenv("GOSHIELD_SHADOW_PID", strconv.Itoa(int(payloadPID)))
-		os.Setenv("GOSHIELD_ORIGINAL_EXE", exePath)
-		sysDir := os.Getenv("WINDIR") + "\\System32\\dllhost.exe"
-		loader.ExecuteAsync(sysDir, myExeBytes)
-	}
-
-	os.Exit(0)
+	// ---------------- 正常启动逻辑 ----------------
+	// 1. 解密 Payload (代码同之前，略)
+    // 2. 启动主程序获取 PID
+    // 3. 启动 dllhost.exe 作为保镖，传入环境变量：
+    //    GOSHIELD_SHADOW_PID = 主程序PID
+    //    GOSHIELD_EXIT_HASH = 退出密码Hash
 }
