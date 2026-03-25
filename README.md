@@ -48,7 +48,7 @@ go build -ldflags "-s -w -H=windowsgui" -o internal/compiler/stub_base.exe ./stu
 :: 5. 编译加壳机主程序 (Builder)
 go build -ldflags "-s -w -H=windowsgui" -o Builder.exe ./cmd/builder
 
-兼容性与最佳实践
+###  ⚠️兼容性与最佳实践
 我们这套 GoShield 系统，由于采用了最硬核的 “不落地内存执行 + ASLR 动态重定位 + 系统白名单进程伪装”，它的免杀隐蔽性极强，但它最适合以下类型的原生 64 位单进程程序：
 
 Go 语言编译的程序（绝配，完美兼容）
@@ -67,5 +67,5 @@ Python (通过 PyInstaller / Nuitka 打包出的) 程序
 
 不建议加壳的程序：采用 Electron/Chromium 多进程架构的软件 (如 VSCode)、以及 .NET/C# 等严重依赖 CLR 托管环境的程序，强行进行纯 Native 内存注入可能导致渲染失败或闪退。
 
-免责声明 (Disclaimer)
+### ⚖️免责声明 (Disclaimer)
 本项目仅供 安全研究、防御技术学习及合法授权的软件保护 目的使用。使用者应当遵守当地相关法律法规。由使用者利用本工具造成的任何直接或间接的非法后果或损失，项目作者不承担任何责任。请勿将本工具用于任何恶意软件 (Malware) 或非授权活动的隐藏与规避用途。
