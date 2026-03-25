@@ -3,11 +3,7 @@ name: Build GoShield GUI Builder
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - master
-
+  
 jobs:
   build-windows:
     name: Build Builder on Windows
