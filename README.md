@@ -1,1 +1,71 @@
-# GoShield
+# GoShield 🛡️ 
+**终极 EXE 内存加密保护与加壳系统 (Ultimate EXE Protector & Packer)**
+
+GoShield 是一款基于 Go 语言开发的强大 Windows 可执行文件 (EXE) 加壳与保护工具。它结合了高级 AES-256 加密、RunPE 内存加载机制、幽灵守护进程以及纯原生 GUI 密码保护机制，为您的应用程序提供无坚不摧的安全装甲。
+
+---
+
+## ✨ 核心特性 (Features)
+
+* 🔒 **军事级加密 (AES-GCM 256)**：每次加壳动态生成随机密钥，Payload 彻底乱码化，完美对抗 IDA Pro、Ghidra 等静态逆向分析工具。
+* 👻 **无文件内存加载 (RunPE / Process Hollowing)**：程序代码仅在内存中解密执行，绝不落地硬盘。支持 ASLR 动态重定位修复，兼容现代系统。
+* 🛡️ **多维主动防御体系**：
+    * **防结束 (Anti-Kill)**：修改 DACL 权限，拦截任务管理器的普通结束进程请求。
+    * **防删除 (Anti-Delete)**：独占式文件句柄锁定，防止程序运行期间被恶意删除。
+* 👥 **COM Surrogate 幽灵保镖 (Shadow Guardian)**：子进程自动伪装并注入系统白名单组件 `dllhost.exe`，后台静默巡逻。若主程序被强制猎杀，保镖将瞬间复活主进程。
+* 🔑 **原生 GUI 密码控制**：
+    * 采用底层 API 调用的原生 Windows 密码输入框，无黑框、无脚本、防杀软拦截。
+    * **动态异或密钥还原**：密码即密钥，密码错误时底层核心绝对无法解密，彻底杜绝爆破。
+* ⚡ **智能设备信任 (本机免密缓存)**：支持勾选“仅首次需密码”，本地生成深度绑定程序特征的授权文件。防篡改设计，一旦授权文件受损自动降级索要密码。
+* 🎨 **无损图标克隆与一键 GUI**：内置基于 `lxn/walk` 构建的精美图形化操作界面，全自动克隆提取并继承原程序图标。
+
+---
+
+## 🛠️ 编译与构建 (Build Instructions)
+
+由于 GoShield 采用了先进的 `//go:embed` 技术将防御外壳 (Stub) 嵌入到加壳机 (Builder) 中，**必须严格遵守“两步走”的编译顺序**。
+
+### 推荐方案：使用 GitHub Actions (全自动云端编译)
+本项目已配置自动化 CI/CD。每次推送代码到 `main` 分支，GitHub Actions 将自动处理依赖、图标清单、并在纯净环境中完成两步编译，最后输出 `GoShield-Release.zip`。您只需在仓库的 `Actions` 页面下载成品即可。
+
+### 方案二：本地手动编译 (Windows 环境)
+如果您想在本地构建，请确保已安装 Go 1.20+，并在项目根目录依次执行以下命令：
+
+```cmd
+:: 1. 安装 Windows GUI 资源编译工具
+go install [github.com/akavel/rsrc@latest](https://github.com/akavel/rsrc@latest)
+
+:: 2. 生成 Manifest 和 图标资源文件
+echo ^<?xml version="1.0" encoding="UTF-8" standalone="yes"?^>^<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"^>^<assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="Builder" type="win32"/^>^<dependency^>^<dependentAssembly^>^<assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/^>^</dependentAssembly^>^</dependency^>^</assembly^> > cmd/builder/builder.manifest
+rsrc -manifest cmd/builder/builder.manifest -ico cmd/builder/app.ico -o cmd/builder/rsrc.syso
+
+:: 3. (关键!) 将 UI 资源复制给 Stub 以激活 Windows 原生界面渲染
+copy cmd\builder\rsrc.syso stub\rsrc.syso
+
+:: 4. 编译底层防御外壳 (Stub)
+go build -ldflags "-s -w -H=windowsgui" -o internal/compiler/stub_base.exe ./stub
+
+:: 5. 编译加壳机主程序 (Builder)
+go build -ldflags "-s -w -H=windowsgui" -o Builder.exe ./cmd/builder
+
+兼容性与最佳实践
+我们这套 GoShield 系统，由于采用了最硬核的 “不落地内存执行 + ASLR 动态重定位 + 系统白名单进程伪装”，它的免杀隐蔽性极强，但它最适合以下类型的原生 64 位单进程程序：
+
+Go 语言编译的程序（绝配，完美兼容）
+
+C / C++ 开发的传统 Native 程序
+
+Rust 开发的程序
+
+Python (通过 PyInstaller / Nuitka 打包出的) 程序
+
+易语言（如果是编译为 64 位的纯原版）
+
+系统架构要求：当前加载器仅支持纯 64位 (x64) 的目标应用程序，不支持 32 位 (x86) 程序。
+
+关于 UPX 压缩：如果您需要极小的文件体积，必须先使用 UPX 压缩原始程序，再使用 GoShield 进行加壳 (顺序绝不能反！)。我们的加载器已对 UPX 的无重定位表特征做了底层兼容。
+
+不建议加壳的程序：采用 Electron/Chromium 多进程架构的软件 (如 VSCode)、以及 .NET/C# 等严重依赖 CLR 托管环境的程序，强行进行纯 Native 内存注入可能导致渲染失败或闪退。
+
+免责声明 (Disclaimer)
+本项目仅供 安全研究、防御技术学习及合法授权的软件保护 目的使用。使用者应当遵守当地相关法律法规。由使用者利用本工具造成的任何直接或间接的非法后果或损失，项目作者不承担任何责任。请勿将本工具用于任何恶意软件 (Malware) 或非授权活动的隐藏与规避用途。
