@@ -2,8 +2,12 @@
 name: Build GoShield GUI Builder
 
 on:
-  workflow_dispatch: # 允许在 Actions 页面手动触发运行
-  
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
 jobs:
   build-windows:
     name: Build Builder on Windows
@@ -16,51 +20,36 @@ jobs:
     - name: Setup Go Environment
       uses: actions/setup-go@v5
       with:
-        go-version: '1.20' # 严格锁定 1.20，确保最终壳在老系统上完美兼容运行
+        go-version: '1.20'
         cache: true
 
     - name: Install UI Dependencies & Prepare Manifest
       run: |
-        # 0. 提前创建一个空占位文件，解决 go mod tidy 解析项目包时 go:embed 找不到目标文件报错的问题
         New-Item -ItemType File -Force -Path internal/compiler/stub_base.exe
-        
-        # 1. 强制降级并锁定底层 sys 库为兼容 Go 1.20 的老版本，解决编译冲突
         go get golang.org/x/sys@v0.18.0
-        
-        # 2. 下载 walk UI 库并整理依赖
         go get github.com/lxn/walk
         go mod tidy
-        
-        # 3. 安装 rsrc 工具，用于生成 Windows 原生窗口外观的清单文件
         go install github.com/akavel/rsrc@latest
         echo '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="Builder" type="win32"/><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/></dependentAssembly></dependency></assembly>' > cmd/builder/builder.manifest
         
-        # 4. 加入严谨的容错机制。如果下载失败，通过 Base64 生成一个合法的 1x1 透明默认图标，防止构建崩溃
         if (!(Test-Path -Path "cmd/builder/app.ico")) {
-            Write-Host "app.ico 图标文件不存在，尝试下载临时默认图标..."
-            try {
-                Invoke-WebRequest -Uri "https://go.dev/favicon.ico" -OutFile "cmd/builder/app.ico" -ErrorAction Stop
-            } catch {
-                Write-Host "网络下载失败，本地生成最小化的合法 ICO 占位文件..."
-                $icoBase64 = "AAABAAEAAQEAAAEAIAAwAAAAFgAAACgAAAABAAAAAgAAAAEAIAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-                [System.IO.File]::WriteAllBytes("cmd/builder/app.ico", [System.Convert]::FromBase64String($icoBase64))
-            }
+            Write-Host "app.ico 缺失，本地生成..."
+            $icoBase64 = "AAABAAEAAQEAAAEAIAAwAAAAFgAAACgAAAABAAAAAgAAAAEAIAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            [System.IO.File]::WriteAllBytes("cmd/builder/app.ico", [System.Convert]::FromBase64String($icoBase64))
         }
         
-        # 5. 编译底层资源
         rsrc -manifest cmd/builder/builder.manifest -ico cmd/builder/app.ico -o cmd/builder/rsrc.syso
 
     - name: Build GoShield (Two-Step Compilation)
       run: |
         mkdir build
         
-        # 🌟 核心修复：两步编译法！
         echo "1. 正在编译底层防御外壳 (Stub)..."
-        # 必须先编译 stub，生成含有最新密码框、防杀逻辑的真实 stub_base.exe 覆盖刚才的空文件
+        # 🌟 关键：将主程序的清单资源复制给 stub，激活 Windows 原生 UI 渲染引擎！
+        cp cmd/builder/rsrc.syso stub/rsrc.syso
         go build -ldflags "-s -w -H=windowsgui" -o internal/compiler/stub_base.exe ./stub
         
         echo "2. 正在编译加壳机主程序 (Builder)..."
-        # 此时 go build 会自动将刚才生成的真实 stub_base.exe 打包到构建器内部
         go build -ldflags "-s -w -H=windowsgui" -o build/Builder.exe ./cmd/builder
 
     - name: Package Release Files
