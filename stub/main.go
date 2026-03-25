@@ -24,24 +24,9 @@ import (
 )
 
 var (
-	kernel32                      = syscall.NewLazyDLL("kernel32.dll")
-	procOpenProcess               = kernel32.NewProc("OpenProcess")
-	procCloseHandle               = kernel32.NewProc("CloseHandle")
-	procTerminateProcess          = kernel32.NewProc("TerminateProcess")
-	procGetCurrentThreadId        = kernel32.NewProc("GetCurrentThreadId")
-
-	user32                        = syscall.NewLazyDLL("user32.dll")
-	procPeekMessageW              = user32.NewProc("PeekMessageW")
-	procMessageBoxW               = user32.NewProc("MessageBoxW")
-	procEnumWindows               = user32.NewProc("EnumWindows")
-	procGetWindowThreadProcessId  = user32.NewProc("GetWindowThreadProcessId")
-	procIsWindowVisible           = user32.NewProc("IsWindowVisible")
-	procSetWinEventHook           = user32.NewProc("SetWinEventHook")
-	procUnhookWinEvent            = user32.NewProc("UnhookWinEvent")
-	procMsgWaitForMultipleObjects = user32.NewProc("MsgWaitForMultipleObjects")
-	procPostThreadMessageW        = user32.NewProc("PostThreadMessageW")
-	procTranslateMessage          = user32.NewProc("TranslateMessage")
-	procDispatchMessageW          = user32.NewProc("DispatchMessageW")
+	user32           = syscall.NewLazyDLL("user32.dll")
+	procPeekMessageW = user32.NewProc("PeekMessageW")
+	procMessageBoxW  = user32.NewProc("MessageBoxW")
 )
 
 type MSG struct {
@@ -62,24 +47,6 @@ func showErrorBox(msg string) {
 	titlePtr, _ := syscall.UTF16PtrFromString("GoShield 安全拦截")
 	msgPtr, _ := syscall.UTF16PtrFromString(msg)
 	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(msgPtr)), uintptr(unsafe.Pointer(titlePtr)), 0x10)
-}
-
-func hasVisibleWindow(pid uint32) bool {
-	var found bool
-	cb := syscall.NewCallback(func(hwnd syscall.Handle, lParam uintptr) uintptr {
-		var wpid uint32
-		procGetWindowThreadProcessId.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&wpid)))
-		if wpid == pid {
-			vis, _, _ := procIsWindowVisible.Call(uintptr(hwnd))
-			if vis != 0 {
-				found = true
-				return 0 
-			}
-		}
-		return 1 
-	})
-	procEnumWindows.Call(cb, 0)
-	return found
 }
 
 func askPassword() string {
@@ -117,7 +84,7 @@ func askPassword() string {
 func verifyExitPassword() bool {
 	hashHex := os.Getenv("GOSHIELD_EXIT_HASH")
 	if hashHex == "" {
-		return true 
+		return true
 	}
 
 	exitVerifyHash, err := hex.DecodeString(hashHex)
@@ -244,7 +211,7 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 			}
 			tokenDir := filepath.Join(appData, "GoShield")
 			os.MkdirAll(tokenDir, 0755)
-			
+
 			tokenFile = filepath.Join(tokenDir, fmt.Sprintf("%x.dat", verifyHash[:8]))
 
 			if cacheData, err := os.ReadFile(tokenFile); err == nil {
@@ -254,7 +221,7 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 
 		pwd := os.Getenv("GOSHIELD_PASSWORD")
 		if pwd == "" && cachedPwd != "" {
-			pwd = cachedPwd 
+			pwd = cachedPwd
 		}
 
 		for {
@@ -290,15 +257,15 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 				if os.Getenv("GOSHIELD_SHADOW_PID") != "" {
 					return nil, fmt.Errorf("wrong password in shadow")
 				}
-				
+
 				if cachedPwd != "" && rememberFlag == 1 {
 					os.Remove(tokenFile)
 					cachedPwd = ""
 				} else {
 					showErrorBox("密码错误，拒绝访问！")
 				}
-				
-				pwd = "" 
+
+				pwd = ""
 			}
 		}
 	}
@@ -318,6 +285,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 拦截层：处理退出密码界面绘制任务
 	if os.Getenv("GOSHIELD_SHOW_EXIT_UI") == "1" {
 		if verifyExitPassword() {
 			os.Exit(0)
@@ -332,99 +300,51 @@ func main() {
 		protect.LockFile(originalExe)
 
 		targetPID, _ := strconv.Atoi(shadowPIDStr)
-		
-		const accessRight = 0x00100000 | 0x0400 | 0x0001
-		
-		// 🌟 获取当前保镖主线程 ID，用于接收事件唤醒信号
-		tidPtr, _, _ := procGetCurrentThreadId.Call()
-		mainThreadId := uint32(tidPtr)
 
-		// 🌟 注册原生的钩子回调函数（0 CPU 占用，全靠系统硬件事件触发）
-		winEventCb := syscall.NewCallback(func(hWinEventHook syscall.Handle, event uint32, hwnd syscall.Handle, idObject int32, idChild int32, idEventThread uint32, dwmsEventTime uint32) uintptr {
-			if idObject == 0 { // 确认是窗口事件 (OBJID_WINDOW)
-				// 发送自定义唤醒信号 (WM_APP = 0x8000) 到我们的主线程，打断无限挂起状态
-				procPostThreadMessageW.Call(uintptr(mainThreadId), 0x8000, 0, 0)
-			}
-			return 0
-		})
+		kernel32 := syscall.NewLazyDLL("kernel32.dll")
+		procOpenProcess := kernel32.NewProc("OpenProcess")
+		procWaitForSingleObject := kernel32.NewProc("WaitForSingleObject")
+		procCloseHandle := kernel32.NewProc("CloseHandle")
+
+		// 权限: SYNCHRONIZE (0x00100000) | PROCESS_QUERY_INFORMATION (0x0400)
+		const accessRight = 0x00100000 | 0x0400
 
 		for {
 			hProcess, _, _ := procOpenProcess.Call(uintptr(accessRight), 0, uintptr(targetPID))
 			if hProcess != 0 {
-				windowAppeared := false
-
-				// 🌟 极限操作：监控目标 PID 的 0x8001(销毁) 到 0x8003(隐藏) 的事件
-				// 这里利用了操作系统的底层无感事件订阅
-				hook, _, _ := procSetWinEventHook.Call(
-					0x8001, 0x8003, 
-					0, winEventCb, uintptr(targetPID), 0, 0) // WINEVENT_OUTOFCONTEXT
-
-				for {
-					// 🌟 绝对 0 轮询：阻塞当前线程直到 hProcess 死亡，或者收到刚才我们设定的唤醒事件 (QS_ALLEVENTS = 0x04BF)
-					// 这期间线程处于内核态深度休眠，完全不消耗 CPU 资源。
-					res, _, _ := procMsgWaitForMultipleObjects.Call(1, uintptr(unsafe.Pointer(&hProcess)), 0, 0xFFFFFFFF, 0x04BF)
-					if res == 0 {
-						break // 进程被强制物理销毁，结束监控
-					}
-
-					// 清理系统通过事件驱动发送给我们的队列消息，否则会阻塞下次唤醒
-					var msg MSG
-					for {
-						hasMsg, _, _ := procPeekMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0, 1) // PM_REMOVE
-						if hasMsg == 0 {
-							break
-						}
-						procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
-						procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
-					}
-
-					// 唤醒后，仅执行这一次状态校验
-					hasVis := hasVisibleWindow(uint32(targetPID))
-					if hasVis {
-						windowAppeared = true
-					} else if windowAppeared {
-						// 一旦发现曾经出现的窗口消失了，说明目标正在退出！瞬间打破死锁！
-						break
-					}
-				}
-
-				if hook != 0 {
-					procUnhookWinEvent.Call(hook)
-				}
+				// 🌟 回归正道：完全放弃对 UI 窗口的猜测，直接在内核态无限期等待目标进程物理死亡。
+				// 0 CPU 消耗，完美兼容托盘程序、静默服务、甚至无界面的控制台程序。
+				procWaitForSingleObject.Call(hProcess, 0xFFFFFFFF)
+				procCloseHandle.Call(hProcess)
 			} else {
-				time.Sleep(500 * time.Millisecond) // 防止异常防空转兜底
+				time.Sleep(500 * time.Millisecond)
 			}
 
-			// 拦截时刻：安全唤起外部带清单（Manifest）的原程序绘制 UI 拦截窗口
+			// 进程确认已死亡（不论是被任务管理器杀，还是在托盘正常点击退出）
+			// 此时唤起原程序进程来帮我们画出退出密码框
 			exitUIPassed := false
 			hashHex := os.Getenv("GOSHIELD_EXIT_HASH")
 			if hashHex == "" {
-				exitUIPassed = true
+				exitUIPassed = true // 未设置退出密码，直接放行
 			} else {
 				cmd := exec.Command(originalExe)
 				cmd.Env = append(os.Environ(), "GOSHIELD_SHOW_EXIT_UI=1")
-				err := cmd.Run()
+				err := cmd.Run() // 阻塞等待用户输入
 				if err == nil {
-					exitUIPassed = true
+					exitUIPassed = true // 退出码为 0，密码正确
 				}
 			}
 
-			if hProcess != 0 {
-				// 战术斩杀：毫不留情地切断依然在后台磨叽的主进程残留线程，杜绝文件抢占
-				procTerminateProcess.Call(hProcess, 0)
-				procCloseHandle.Call(hProcess)
-			}
-
 			if exitUIPassed {
-				break 
+				break // 退出密码正确或未设置，保镖结束监控，彻底放行
 			}
 
-			// 密码错误：执行瞬发复活逻辑
+			// 密码错误、点击取消、直接关掉 X，执行强硬满血复活逻辑
 			decryptedPayload, err := extractAndDecrypt(originalExe)
 			if err != nil {
 				break
 			}
-			
+
 			newPID, err := loader.ExecuteAsync(originalExe, decryptedPayload)
 			if err != nil {
 				break
@@ -436,7 +356,7 @@ func main() {
 
 	decryptedPayload, err := extractAndDecrypt(exePath)
 	if err != nil {
-		os.Exit(1) 
+		os.Exit(1)
 	}
 
 	payloadPID, err := loader.ExecuteAsync(exePath, decryptedPayload)
