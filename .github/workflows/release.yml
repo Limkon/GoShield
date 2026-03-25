@@ -24,6 +24,8 @@ jobs:
         New-Item -ItemType File -Force -Path internal/compiler/stub_base.exe
         go get golang.org/x/sys@v0.18.0
         go get github.com/lxn/walk
+        # 🌟 仅在此处新增一行：下载命名管道通讯库，支撑后续零延迟退出机制
+        go get github.com/microsoft/go-winio
         go mod tidy
         go install github.com/akavel/rsrc@latest
         echo '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="Builder" type="win32"/><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/></dependentAssembly></dependency></assembly>' > cmd/builder/builder.manifest
