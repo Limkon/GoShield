@@ -30,7 +30,7 @@ func main() {
 		AssignTo: &mw,
 		Title:    "GoShield", // 标题稍微改短一点以适应小窗口
 		MinSize:  Size{Width: 300, Height: 300}, // 🌟 修改：最小尺寸缩小为 300x300
-		Size:     Size{Width: 300, Height: 300}, // 🌟 修改：初始尺寸强制为 300x300
+		Size:     Size{Width: 600, Height: 300}, // 🌟 修改：初始尺寸强制为 300x300
 		Layout:   VBox{},
 		Children: []Widget{
 			GroupBox{
