@@ -2,14 +2,12 @@
 package main
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -17,11 +15,15 @@ import (
 	"github.com/Limkon/GoShield/internal/crypto"
 	"github.com/Limkon/GoShield/internal/loader"
 	"github.com/Limkon/GoShield/internal/protect"
+
+	"github.com/lxn/walk"
+	. "github.com/lxn/walk/declarative"
 )
 
 var (
 	user32           = syscall.NewLazyDLL("user32.dll")
 	procPeekMessageW = user32.NewProc("PeekMessageW")
+	procMessageBoxW  = user32.NewProc("MessageBoxW")
 )
 
 type MSG struct {
@@ -38,23 +40,43 @@ func stopLoadingCursor() {
 	procPeekMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0, 1)
 }
 
-// 🌟 极简方案：动态呼出系统控制台 (黑框) 输入密码，输入完立刻自动销毁！
+func showErrorBox(msg string) {
+	titlePtr, _ := syscall.UTF16PtrFromString("GoShield 安全拦截")
+	msgPtr, _ := syscall.UTF16PtrFromString(msg)
+	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(msgPtr)), uintptr(unsafe.Pointer(titlePtr)), 0x10)
+}
+
+// 🌟 终极纯原生 GUI：使用项目内置的 walk 库绘制密码窗口
 func askPassword() string {
-	kernel32 := syscall.NewLazyDLL("kernel32.dll")
-	kernel32.NewProc("AllocConsole").Call()       // 动态创建一个黑框
-	defer kernel32.NewProc("FreeConsole").Call()  // 函数结束时瞬间销毁它
+	var dlg *walk.Dialog
+	var pwdTE *walk.LineEdit
+	var pwd string
 
-	// 绑定标准输入输出到这个新黑框
-	out, _ := os.OpenFile("CONOUT$", os.O_WRONLY, 0)
-	in, _ := os.OpenFile("CONIN$", os.O_RDONLY, 0)
-	defer out.Close()
-	defer in.Close()
+	err := Dialog{
+		AssignTo: &dlg,
+		Title:    "GoShield 安全验证",
+		MinSize:  Size{Width: 320, Height: 120},
+		Layout:   VBox{},
+		Children: []Widget{
+			Label{Text: "此程序已被高级加密保护，请输入启动密码:"},
+			LineEdit{
+				AssignTo:     &pwdTE,
+				PasswordMode: true, // 开启星号掩码保护
+			},
+			PushButton{
+				Text: "🚀 验证并启动",
+				OnClicked: func() {
+					pwd = pwdTE.Text()
+					dlg.Accept() // 关闭窗口并继续
+				},
+			},
+		},
+	}.Run(nil)
 
-	out.WriteString("\r\n  [GoShield Security]\r\n  此程序已被加密保护，请输入启动密码: ")
-	
-	reader := bufio.NewReader(in)
-	pwd, _ := reader.ReadString('\n')
-	return strings.TrimSpace(pwd)
+	if err != nil || pwd == "" {
+		return ""
+	}
+	return pwd
 }
 
 func extractAndDecrypt(exePath string) ([]byte, error) {
@@ -107,7 +129,7 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 		for {
 			if pwd == "" {
 				pwd = askPassword()
-				if pwd == "" { 
+				if pwd == "" {
 					return nil, fmt.Errorf("user cancelled")
 				}
 			}
@@ -133,7 +155,8 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 				if os.Getenv("GOSHIELD_SHADOW_PID") != "" {
 					return nil, fmt.Errorf("wrong password in shadow")
 				}
-				pwd = "" // 密码错误，重置密码重新走循环再次弹出黑框
+				showErrorBox("密码错误，拒绝访问！")
+				pwd = "" // 密码错误，清空密码重新弹出 GUI 窗口
 			}
 		}
 	}
