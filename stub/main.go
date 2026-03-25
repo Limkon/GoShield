@@ -55,7 +55,7 @@ func askPassword() string {
 
 	_, err := Dialog{
 		AssignTo: &dlg,
-		Title:    "GoShield 安全验证",
+		Title:    "安全验证",
 		MinSize:  Size{Width: 320, Height: 120},
 		Layout:   VBox{},
 		Children: []Widget{
