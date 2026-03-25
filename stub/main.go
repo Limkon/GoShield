@@ -2,15 +2,16 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
+	"github.com/microsoft/go-winio"
 )
 
 var (
@@ -35,6 +37,15 @@ var (
 	procSystemParametersInfoW = user32.NewProc("SystemParametersInfoW")
 	procSetWindowPos          = user32.NewProc("SetWindowPos")
 )
+
+// 🌟 全局状态控制：用于区分是合法退出，还是被强制他杀
+var (
+	authorizedExit      bool
+	authorizedExitMutex sync.Mutex
+)
+
+// 定义唯一的命名管道通讯地址
+const authPipeName = `\\.\pipe\GoShieldAuthPipe`
 
 type MSG struct {
 	Hwnd    syscall.Handle
@@ -53,11 +64,9 @@ func stopLoadingCursor() {
 func showErrorBox(msg string) {
 	titlePtr, _ := syscall.UTF16PtrFromString("GoShield 安全拦截")
 	msgPtr, _ := syscall.UTF16PtrFromString(msg)
-	// 0x40010 = MB_TOPMOST (强制最上层) | MB_ICONHAND (错误红叉图标)
 	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(msgPtr)), uintptr(unsafe.Pointer(titlePtr)), 0x40010)
 }
 
-// 采用 MainWindow + 绝对坐标计算，完美实现右下角全局置顶
 func askPassword() string {
 	var mw *walk.MainWindow
 	var pwdTE *walk.LineEdit
@@ -96,7 +105,6 @@ func askPassword() string {
 	y := int(rect.Bottom) - 120 - 15
 
 	mw.SetBounds(walk.Rectangle{X: x, Y: y, Width: 320, Height: 120})
-	// HWND_TOPMOST (-1) 强制置顶
 	procSetWindowPos.Call(uintptr(mw.Handle()), ^uintptr(0), uintptr(x), uintptr(y), 0, 0, 0x0041)
 
 	mw.Run()
@@ -106,7 +114,7 @@ func askPassword() string {
 func verifyExitPassword() bool {
 	hashHex := os.Getenv("GOSHIELD_EXIT_HASH")
 	if hashHex == "" {
-		return true
+		return true // 如果没有设置退出密码，直接放行
 	}
 
 	exitVerifyHash, err := hex.DecodeString(hashHex)
@@ -214,6 +222,7 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 		return nil, fmt.Errorf("size error")
 	}
 
+	// 初始化退出密码环境（供后续的 UI 拦截使用）
 	isExitZero := true
 	for _, b := range exitVerifyHash {
 		if b != 0 {
@@ -323,13 +332,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if os.Getenv("GOSHIELD_SHOW_EXIT_UI") == "1" {
-		if verifyExitPassword() {
-			os.Exit(0)
-		}
-		os.Exit(1)
-	}
-
+	// 🌟 幽灵保镖模式：执行防护、建立通讯管道并监控生死
 	shadowPIDStr := os.Getenv("GOSHIELD_SHADOW_PID")
 	if shadowPIDStr != "" {
 		protect.ProtectProcess()
@@ -337,38 +340,62 @@ func main() {
 		protect.LockFile(originalExe)
 
 		targetPID, _ := strconv.Atoi(shadowPIDStr)
-		const accessRight = 0x00100000 | 0x0400 // SYNCHRONIZE | QUERY_INFORMATION
 
+		// 1. 启动管道服务端，独立于主线程运行
+		listener, err := winio.ListenPipe(authPipeName, nil)
+		if err == nil {
+			go func() {
+				for {
+					conn, err := listener.Accept()
+					if err != nil {
+						continue
+					}
+
+					reader := bufio.NewReader(conn)
+					msg, _ := reader.ReadString('\n')
+
+					// 收到主程序的“离职申请”
+					if msg == "TRY_EXIT\n" {
+						// 瞬间弹出保镖进程内部已经预热好的密码框
+						if verifyExitPassword() {
+							// 密码正确，修改放行状态位，并给主程序发放准行许可
+							authorizedExitMutex.Lock()
+							authorizedExit = true
+							authorizedExitMutex.Unlock()
+
+							conn.Write([]byte("ALLOW\n"))
+						} else {
+							// 密码错误，直接驳回，托盘程序甚至不会感知到闪烁
+							conn.Write([]byte("REJECT\n"))
+						}
+					}
+					conn.Close()
+				}
+			}()
+		}
+
+		// 2. 监控线程：死等物理进程状态
+		const accessRight = 0x00100000 | 0x0400 // SYNCHRONIZE | QUERY_INFORMATION
 		for {
 			hProcess, _, _ := procOpenProcess.Call(uintptr(accessRight), 0, uintptr(targetPID))
 			if hProcess != 0 {
-				// 🌟 核心回归：放弃一切不稳定的窗口探测，直接在内核死等进程物理死亡。
-				// 绝对 0 消耗，绝对防误杀，绝对兼容任何形态的程序。
 				procWaitForSingleObject.Call(hProcess, 0xFFFFFFFF)
 				procCloseHandle.Call(hProcess)
 			} else {
 				time.Sleep(500 * time.Millisecond)
 			}
 
-			exitUIPassed := false
-			hashHex := os.Getenv("GOSHIELD_EXIT_HASH")
-			if hashHex == "" {
-				exitUIPassed = true 
-			} else {
-				// 🌟 物理规律：此处会有约 1 秒的 Go GUI 初始化延迟，
-				// 这是为您呈现高质量原生输入框必须付出的框架启动成本。
-				cmd := exec.Command(originalExe)
-				cmd.Env = append(os.Environ(), "GOSHIELD_SHOW_EXIT_UI=1")
-				err := cmd.Run() 
-				if err == nil {
-					exitUIPassed = true 
-				}
+			// 进程确认物理死亡。判断它是因为拿到了“审批许可”才退出的，还是被外力强杀的？
+			authorizedExitMutex.Lock()
+			isAuth := authorizedExit
+			authorizedExitMutex.Unlock()
+
+			if isAuth {
+				// 走正规流程退出，保镖圆满完成任务，功成身退
+				os.Exit(0)
 			}
 
-			if exitUIPassed {
-				break 
-			}
-
+			// 🌟 未经授权的进程死亡（防杀防御触发！）
 			decryptedPayload, err := extractAndDecrypt(originalExe)
 			if err != nil {
 				break
@@ -378,11 +405,12 @@ func main() {
 			if err != nil {
 				break
 			}
-			targetPID = int(newPID)
+			targetPID = int(newPID) // 更新为新生成的 PID，继续进行下一轮监控防线
 		}
 		os.Exit(0)
 	}
 
+	// ---------------- 第一阶段：正常启动与注入加载 ----------------
 	decryptedPayload, err := extractAndDecrypt(exePath)
 	if err != nil {
 		os.Exit(1)
