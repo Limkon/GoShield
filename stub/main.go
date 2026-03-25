@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings" // 🌟 核心修复：引入 strings 包来处理换行符陷阱
 	"sync"
 	"syscall"
 	"time"
@@ -22,7 +23,7 @@ import (
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
-	"github.com/Microsoft/go-winio"
+	"github.com/Microsoft/go-winio" // 🌟 必须是大写 Microsoft
 )
 
 var (
@@ -38,7 +39,7 @@ var (
 	procSetWindowPos          = user32.NewProc("SetWindowPos")
 )
 
-// 🌟 全局状态控制：用于区分是合法退出，还是被强制他杀
+// 全局状态控制：用于区分主程序是走正规流程退出，还是被强制他杀
 var (
 	authorizedExit      bool
 	authorizedExitMutex sync.Mutex
@@ -353,9 +354,12 @@ func main() {
 
 					reader := bufio.NewReader(conn)
 					msg, _ := reader.ReadString('\n')
+					
+					// 🌟 核心修复：彻底清除 Windows 下可能携带的 \r 以及 \n 换行符
+					cleanMsg := strings.TrimSpace(msg)
 
 					// 收到主程序的“离职申请”
-					if msg == "TRY_EXIT\n" {
+					if cleanMsg == "TRY_EXIT" {
 						// 瞬间弹出保镖进程内部已经预热好的密码框
 						if verifyExitPassword() {
 							// 密码正确，修改放行状态位，并给主程序发放准行许可
