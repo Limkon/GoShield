@@ -48,54 +48,21 @@ func stopLoadingCursor() {
 func showErrorBox(msg string) {
 	titlePtr, _ := syscall.UTF16PtrFromString("GoShield 安全拦截")
 	msgPtr, _ := syscall.UTF16PtrFromString(msg)
-	// 0x40010 = MB_TOPMOST (最上层) | MB_ICONHAND (错误图标)
+	// 0x40010 = MB_TOPMOST (强制最上层) | MB_ICONHAND (错误红叉图标)
 	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(msgPtr)), uintptr(unsafe.Pointer(titlePtr)), 0x40010)
 }
 
-// 🌟 终极修复：使用“双重锁死”策略强制压制窗口坐标与层级
-func setupDialogPlacement(dlg *walk.Dialog) {
-	var rect struct {
-		Left, Top, Right, Bottom int32
-	}
-	// 0x0030 = SPI_GETWORKAREA (获取除去任务栏的可用桌面空间)
-	procSystemParametersInfoW.Call(0x0030, 0, uintptr(unsafe.Pointer(&rect)), 0)
-
-	size := dlg.Size()
-	x := int(rect.Right) - int(size.Width) - 15
-	y := int(rect.Bottom) - int(size.Height) - 15
-
-	// 1. 突破 walk 框架限制：提前设置坐标并显式调用 Show()
-	// 这能欺骗内部逻辑，让它跳过默认的居中计算代码
-	dlg.SetBounds(walk.Rectangle{X: int(x), Y: int(y), Width: size.Width, Height: size.Height})
-	dlg.Show()
-
-	// HWND_TOPMOST = -1 (^uintptr(0))
-	// 0x0041 = SWP_SHOWWINDOW (0x0040) | SWP_NOSIZE (0x0001)
-	
-	// 2. 第一层锁死：在当前线程立刻应用系统级置顶 API
-	procSetWindowPos.Call(uintptr(dlg.Handle()), ^uintptr(0), uintptr(x), uintptr(y), 0, 0, 0x0041)
-
-	// 3. 第二层锁死：等待消息循环正式启动后 (50ms)，如果框架发生了意外重绘，
-	// 再次强制钉回最上层右下角！彻底杜绝闪烁和层级丢失。
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		dlg.Synchronize(func() {
-			if dlg.Handle() != 0 {
-				procSetWindowPos.Call(uintptr(dlg.Handle()), ^uintptr(0), uintptr(x), uintptr(y), 0, 0, 0x0041)
-			}
-		})
-	}()
-}
-
+// 🌟 核心重构：抛弃 Dialog，使用完全听话的 MainWindow
 func askPassword() string {
-	var dlg *walk.Dialog
+	var mw *walk.MainWindow
 	var pwdTE *walk.LineEdit
 	var pwd string
 
-	err := Dialog{
-		AssignTo: &dlg,
+	err := MainWindow{
+		AssignTo: &mw,
 		Title:    "安全验证",
 		MinSize:  Size{Width: 320, Height: 120},
+		Size:     Size{Width: 320, Height: 120}, // 直接写死固定尺寸
 		Layout:   VBox{},
 		Children: []Widget{
 			Label{Text: "此程序已被高级加密保护，请输入启动密码:"},
@@ -107,19 +74,31 @@ func askPassword() string {
 				Text: "🚀 验证并启动",
 				OnClicked: func() {
 					pwd = pwdTE.Text()
-					dlg.Accept()
+					mw.Close() // 关闭 MainWindow 即可结束运行循环
 				},
 			},
 		},
-	}.Create(nil)
+	}.Create()
 
 	if err != nil {
 		return ""
 	}
 
-	setupDialogPlacement(dlg)
-	dlg.Run()
+	// 1. 物理计算：获取屏幕除去任务栏的真实面积
+	var rect struct{ Left, Top, Right, Bottom int32 }
+	procSystemParametersInfoW.Call(0x0030, 0, uintptr(unsafe.Pointer(&rect)), 0)
 
+	// 计算绝对坐标 (唯一合法路径：屏幕右边界 - 窗口宽 - 边距)
+	x := int(rect.Right) - 320 - 15
+	y := int(rect.Bottom) - 120 - 15
+
+	// 2. 赋予坐标：MainWindow 会完美遵守
+	mw.SetBounds(walk.Rectangle{X: x, Y: y, Width: 320, Height: 120})
+	
+	// 3. 强行置顶：HWND_TOPMOST (-1)
+	procSetWindowPos.Call(uintptr(mw.Handle()), ^uintptr(0), uintptr(x), uintptr(y), 0, 0, 0x0041)
+
+	mw.Run()
 	return pwd
 }
 
@@ -134,14 +113,15 @@ func verifyExitPassword() bool {
 		return true
 	}
 
-	var dlg *walk.Dialog
+	var mw *walk.MainWindow
 	var pwdTE *walk.LineEdit
 	var pwd string
 
-	err = Dialog{
-		AssignTo: &dlg,
+	err = MainWindow{
+		AssignTo: &mw,
 		Title:    "退出安全验证",
 		MinSize:  Size{Width: 320, Height: 120},
+		Size:     Size{Width: 320, Height: 120},
 		Layout:   VBox{},
 		Children: []Widget{
 			Label{Text: "程序请求退出，请输入密码以确认关闭:"},
@@ -153,18 +133,28 @@ func verifyExitPassword() bool {
 				Text: "🛑 确认退出",
 				OnClicked: func() {
 					pwd = pwdTE.Text()
-					dlg.Accept()
+					mw.Close()
 				},
 			},
 		},
-	}.Create(nil)
+	}.Create()
 
 	if err != nil {
 		return false
 	}
 
-	setupDialogPlacement(dlg)
-	dlg.Run()
+	// 1. 物理计算：获取屏幕可用区域
+	var rect struct{ Left, Top, Right, Bottom int32 }
+	procSystemParametersInfoW.Call(0x0030, 0, uintptr(unsafe.Pointer(&rect)), 0)
+
+	x := int(rect.Right) - 320 - 15
+	y := int(rect.Bottom) - 120 - 15
+
+	// 2. 精准定位与置顶
+	mw.SetBounds(walk.Rectangle{X: x, Y: y, Width: 320, Height: 120})
+	procSetWindowPos.Call(uintptr(mw.Handle()), ^uintptr(0), uintptr(x), uintptr(y), 0, 0, 0x0041)
+
+	mw.Run()
 
 	if pwd == "" {
 		return false
@@ -334,7 +324,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 拦截层：处理退出密码界面绘制任务
 	if os.Getenv("GOSHIELD_SHOW_EXIT_UI") == "1" {
 		if verifyExitPassword() {
 			os.Exit(0)
@@ -355,7 +344,6 @@ func main() {
 		procWaitForSingleObject := kernel32.NewProc("WaitForSingleObject")
 		procCloseHandle := kernel32.NewProc("CloseHandle")
 
-		// 权限: SYNCHRONIZE (0x00100000) | PROCESS_QUERY_INFORMATION (0x0400)
 		const accessRight = 0x00100000 | 0x0400
 
 		for {
@@ -367,25 +355,23 @@ func main() {
 				time.Sleep(500 * time.Millisecond)
 			}
 
-			// 进程确认已死亡（不论是被任务管理器杀，还是在托盘正常点击退出）
 			exitUIPassed := false
 			hashHex := os.Getenv("GOSHIELD_EXIT_HASH")
 			if hashHex == "" {
-				exitUIPassed = true // 未设置退出密码，直接放行
+				exitUIPassed = true 
 			} else {
 				cmd := exec.Command(originalExe)
 				cmd.Env = append(os.Environ(), "GOSHIELD_SHOW_EXIT_UI=1")
-				err := cmd.Run() // 阻塞等待用户输入
+				err := cmd.Run() 
 				if err == nil {
-					exitUIPassed = true // 退出码为 0，密码正确
+					exitUIPassed = true 
 				}
 			}
 
 			if exitUIPassed {
-				break // 退出密码正确或未设置，保镖结束监控，彻底放行
+				break 
 			}
 
-			// 密码错误、点击取消，执行强硬满血复活逻辑
 			decryptedPayload, err := extractAndDecrypt(originalExe)
 			if err != nil {
 				break
