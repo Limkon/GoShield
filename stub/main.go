@@ -3,10 +3,8 @@ package main
 
 import (
 	"encoding/binary"
-	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"github.com/Limkon/GoShield/internal/crypto"
 	"github.com/Limkon/GoShield/internal/loader"
@@ -14,98 +12,88 @@ import (
 )
 
 func main() {
-	// 🌟 0. 核心判别：检查是否是“内存影子进程”
-	// 如果是通过下面的 RunPE 注入到 svchost.exe 中启动的，就会带有这个环境变量
-	if os.Getenv("GOSHIELD_SHADOW_PID") != "" {
-		protect.RunShadowMode()
-		return // 影子进程职责结束直接退出，绝不执行下面耗费资源的解密和业务逻辑
-	}
-
-	// 1. 以下是主进程逻辑：先读取附加数据
 	exePath, err := os.Executable()
 	if err != nil {
 		os.Exit(1)
 	}
 
-	file, err := os.Open(exePath)
-	if err != nil {
-		os.Exit(1)
-	}
+	// 🌟 1. 终极分流：判断当前是否是潜伏在 svchost.exe 中的幽灵保镖
+	originalExe := os.Getenv("GOSHIELD_ORIGINAL_EXE")
+	if originalExe != "" {
+		// ==========================================
+		// === 幽灵保镖逻辑 (此时运行在 svchost.exe 内存中) ===
+		// ==========================================
+		
+		// 开启 DACL 护甲保护幽灵保镖自己，免疫常规强杀
+		protect.ProtectProcess()
+		// 跨进程死死锁住真正的带壳原文件，防止被用户删除
+		protect.LockFile(originalExe)
 
-	stat, err := file.Stat()
-	if err != nil {
+		// 穿透读取原文件末尾的加密 Payload 核心
+		file, err := os.Open(originalExe)
+		if err != nil {
+			os.Exit(1)
+		}
+
+		stat, err := file.Stat()
+		if err != nil {
+			file.Close()
+			os.Exit(1)
+		}
+		fileSize := stat.Size()
+
+		footerSize := int64(48)
+		file.Seek(-footerSize, io.SeekEnd)
+		footer := make([]byte, footerSize)
+		io.ReadFull(file, footer)
+
+		key := footer[0:32]
+		payloadSize := binary.LittleEndian.Uint64(footer[32:40])
+
+		file.Seek(-(footerSize + int64(payloadSize)), io.SeekEnd)
+		encryptedPayload := make([]byte, payloadSize)
+		io.ReadFull(file, encryptedPayload)
 		file.Close()
-		os.Exit(1)
+
+		// 解密出纯净的真实业务程序
+		decryptedPayload, err := crypto.Decrypt(encryptedPayload, key)
+		if err != nil {
+			os.Exit(1)
+		}
+
+		// 无限轮回守护：只要业务程序被杀，幽灵立刻将其拉回复活点！
+		for {
+			// 以原文件路径作为宿主启动业务程序，完美解决配置文件路径读取问题！
+			// Execute 内部会自动给业务程序套上 DACL 防杀护甲
+			exitCode, err := loader.Execute(originalExe, decryptedPayload)
+			if err != nil {
+				break // 底层创建失败直接退出
+			}
+			
+			// ExitCode 为 0 表示正常退出 (如用户点击软件右上角的 X 正常关闭)
+			// 此时幽灵保镖也功成身退，退出循环，释放文件锁
+			if exitCode == 0 {
+				break
+			}
+			// 否则是被 Win11 内核级黑客工具强杀，循环不退，瞬间原地复活！
+		}
+		os.Exit(0)
 	}
-	fileSize := stat.Size()
 
-	footerSize := int64(48)
-	if fileSize < footerSize {
-		file.Close()
-		os.Exit(1)
-	}
-
-	file.Seek(-footerSize, io.SeekEnd)
-	footer := make([]byte, footerSize)
-	io.ReadFull(file, footer)
-
-	if string(footer[40:48]) != "GOSHIELD" {
-		file.Close()
-		os.Exit(1)
-	}
-
-	key := footer[0:32]
-	payloadSize := binary.LittleEndian.Uint64(footer[32:40])
-
-	if fileSize < footerSize+int64(payloadSize) {
-		file.Close()
-		os.Exit(1)
-	}
-
-	file.Seek(-(footerSize + int64(payloadSize)), io.SeekEnd)
-	encryptedPayload := make([]byte, payloadSize)
-	io.ReadFull(file, encryptedPayload)
+	// ==========================================
+	// === 原始父进程逻辑 (用户双击运行时的第一瞬间) ===
+	// ==========================================
 	
-	file.Close()
-
-	// 2. 启动单机防御：独占锁定防删、DACL 防杀护甲
-	protect.EnableProtection()
-
-	// 3. 🌟 启动无文件落地（纯内存）的终极影子守护
-	protect.SetupMainWatchdog()
 	myExeBytes, err := os.ReadFile(exePath)
 	if err == nil {
-		// 设置环境变量，供影子继承
-		os.Setenv("GOSHIELD_SHADOW_PID", fmt.Sprint(os.Getpid()))
+		// 告诉即将创建的幽灵：你的本体在哪里
 		os.Setenv("GOSHIELD_ORIGINAL_EXE", exePath)
 
-		// 将自身的外壳程序字节码，掏空注入到合法的系统进程 svchost.exe 中！
-		go func() {
-			_ = loader.Execute("C:\\Windows\\System32\\svchost.exe", myExeBytes)
-		}()
-
-		// 挂起 100 毫秒，确保底层的 CreateProcessW 已经完成了环境变量的继承读取
-		time.Sleep(100 * time.Millisecond)
-
-		// 立刻擦除这俩敏感的环境变量，防止一会运行真正的业务程序时被污染
-		os.Unsetenv("GOSHIELD_SHADOW_PID")
-		os.Unsetenv("GOSHIELD_ORIGINAL_EXE")
+		// 异步将自身 (加壳机外壳) 注入到合法的 svchost.exe 中，启动幽灵保镖
+		loader.ExecuteAsync("C:\\Windows\\System32\\svchost.exe", myExeBytes)
 	}
 
-	// 4. 解密真实程序的 Payload
-	decryptedPayload, err := crypto.Decrypt(encryptedPayload, key)
-	if err != nil {
-		protect.NotifyNormalExit()
-		os.Exit(1)
-	}
-
-	// 5. 执行内存加载 (RunPE)，运行您自己真正的业务代码
-	err = loader.Execute(exePath, decryptedPayload)
-	if err != nil {
-		protect.NotifyNormalExit()
-		os.Exit(1)
-	}
-
-	// 6. 真实程序已退出，触发安全信号通知影子进程和平关闭！
-	protect.NotifyNormalExit()
+	// 献祭：父进程完成孵化幽灵的任务后，立刻自杀！
+	// 这样任务管理器里就不会出现两个一模一样的程序名字了！
+	os.Exit(0)
 }
