@@ -24,9 +24,10 @@ import (
 )
 
 var (
-	user32           = syscall.NewLazyDLL("user32.dll")
-	procPeekMessageW = user32.NewProc("PeekMessageW")
-	procMessageBoxW  = user32.NewProc("MessageBoxW")
+	user32                    = syscall.NewLazyDLL("user32.dll")
+	procPeekMessageW          = user32.NewProc("PeekMessageW")
+	procMessageBoxW           = user32.NewProc("MessageBoxW")
+	procSystemParametersInfoW = user32.NewProc("SystemParametersInfoW") // 🌟 新增：用于获取屏幕工作区大小
 )
 
 type MSG struct {
@@ -49,12 +50,27 @@ func showErrorBox(msg string) {
 	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(msgPtr)), uintptr(unsafe.Pointer(titlePtr)), 0x10)
 }
 
+// 🌟 新增核心功能：将指定窗口精准移动到屏幕右下角（自动避开任务栏）
+func moveToBottomRight(dlg *walk.Dialog) {
+	var rect struct {
+		Left, Top, Right, Bottom int32
+	}
+	// SPI_GETWORKAREA = 0x0030，获取除去任务栏以外的桌面可用空间
+	procSystemParametersInfoW.Call(0x0030, 0, uintptr(unsafe.Pointer(&rect)), 0)
+
+	size := dlg.Size()
+	// 右下角定位，保留 15 像素的安全边距，显得更美观
+	dlg.SetX(int(rect.Right) - size.Width - 15)
+	dlg.SetY(int(rect.Bottom) - size.Height - 15)
+}
+
 func askPassword() string {
 	var dlg *walk.Dialog
 	var pwdTE *walk.LineEdit
 	var pwd string
 
-	_, err := Dialog{
+	// 🌟 修复：将 Run() 拆分为 Create()，以便在显示前操作坐标
+	err := Dialog{
 		AssignTo: &dlg,
 		Title:    "安全验证",
 		MinSize:  Size{Width: 320, Height: 120},
@@ -73,11 +89,16 @@ func askPassword() string {
 				},
 			},
 		},
-	}.Run(nil)
+	}.Create(nil)
 
-	if err != nil || pwd == "" {
+	if err != nil {
 		return ""
 	}
+
+	// 将弹窗移动到右下角后，再开始阻塞运行
+	moveToBottomRight(dlg)
+	dlg.Run()
+
 	return pwd
 }
 
@@ -96,7 +117,7 @@ func verifyExitPassword() bool {
 	var pwdTE *walk.LineEdit
 	var pwd string
 
-	_, err = Dialog{
+	err = Dialog{
 		AssignTo: &dlg,
 		Title:    "退出安全验证",
 		MinSize:  Size{Width: 320, Height: 120},
@@ -115,9 +136,17 @@ func verifyExitPassword() bool {
 				},
 			},
 		},
-	}.Run(nil)
+	}.Create(nil)
 
-	if pwd == "" || err != nil {
+	if err != nil {
+		return false
+	}
+
+	// 同样，退出拦截窗口也移动到右下角
+	moveToBottomRight(dlg)
+	dlg.Run()
+
+	if pwd == "" {
 		return false
 	}
 
@@ -312,8 +341,6 @@ func main() {
 		for {
 			hProcess, _, _ := procOpenProcess.Call(uintptr(accessRight), 0, uintptr(targetPID))
 			if hProcess != 0 {
-				// 🌟 回归正道：完全放弃对 UI 窗口的猜测，直接在内核态无限期等待目标进程物理死亡。
-				// 0 CPU 消耗，完美兼容托盘程序、静默服务、甚至无界面的控制台程序。
 				procWaitForSingleObject.Call(hProcess, 0xFFFFFFFF)
 				procCloseHandle.Call(hProcess)
 			} else {
@@ -321,7 +348,6 @@ func main() {
 			}
 
 			// 进程确认已死亡（不论是被任务管理器杀，还是在托盘正常点击退出）
-			// 此时唤起原程序进程来帮我们画出退出密码框
 			exitUIPassed := false
 			hashHex := os.Getenv("GOSHIELD_EXIT_HASH")
 			if hashHex == "" {
@@ -339,7 +365,7 @@ func main() {
 				break // 退出密码正确或未设置，保镖结束监控，彻底放行
 			}
 
-			// 密码错误、点击取消、直接关掉 X，执行强硬满血复活逻辑
+			// 密码错误、点击取消，执行强硬满血复活逻辑
 			decryptedPayload, err := extractAndDecrypt(originalExe)
 			if err != nil {
 				break
