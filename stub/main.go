@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -46,7 +47,7 @@ func showErrorBox(msg string) {
 	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(msgPtr)), uintptr(unsafe.Pointer(titlePtr)), 0x10)
 }
 
-// 🌟 终极纯原生 GUI：使用项目内置的 walk 库绘制密码窗口
+// 终极纯原生 GUI：使用项目内置的 walk 库绘制密码窗口
 func askPassword() string {
 	var dlg *walk.Dialog
 	var pwdTE *walk.LineEdit
@@ -54,7 +55,7 @@ func askPassword() string {
 
 	_, err := Dialog{
 		AssignTo: &dlg,
-		Title:    "",
+		Title:    "GoShield 安全验证",
 		MinSize:  Size{Width: 320, Height: 120},
 		Layout:   VBox{},
 		Children: []Widget{
@@ -92,7 +93,8 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 	}
 	fileSize := stat.Size()
 
-	footerSize := int64(80)
+	// 🌟 修复：尾部元数据尺寸扩展到了 81 字节 (新增了 1 字节的标志位)
+	footerSize := int64(81)
 	if fileSize < footerSize {
 		return nil, fmt.Errorf("no payload")
 	}
@@ -101,13 +103,14 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 	footer := make([]byte, footerSize)
 	io.ReadFull(file, footer)
 
-	if string(footer[72:80]) != "GOSHIELD" {
+	if string(footer[73:81]) != "GOSHIELD" {
 		return nil, fmt.Errorf("magic error")
 	}
 
 	verifyHash := footer[0:32]
 	finalKey := footer[32:64]
-	payloadSize := binary.LittleEndian.Uint64(footer[64:72])
+	rememberFlag := footer[64] // 🌟 读取第 64 字节位置的免密标志位
+	payloadSize := binary.LittleEndian.Uint64(footer[65:73])
 
 	if fileSize < footerSize+int64(payloadSize) {
 		return nil, fmt.Errorf("size error")
@@ -125,7 +128,30 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 	if isZero {
 		copy(realKey, finalKey)
 	} else {
+		var cachedPwd string
+		var tokenFile string
+
+		// 🌟 核心逻辑：只有用户勾选了免密 (rememberFlag == 1)，才去初始化缓存系统
+		if rememberFlag == 1 {
+			appData, err := os.UserConfigDir()
+			if err != nil {
+				appData = os.TempDir()
+			}
+			tokenDir := filepath.Join(appData, "GoShield")
+			os.MkdirAll(tokenDir, 0755)
+			
+			tokenFile = filepath.Join(tokenDir, fmt.Sprintf("%x.dat", verifyHash[:8]))
+
+			if cacheData, err := os.ReadFile(tokenFile); err == nil {
+				cachedPwd = string(cacheData)
+			}
+		}
+
 		pwd := os.Getenv("GOSHIELD_PASSWORD")
+		if pwd == "" && cachedPwd != "" {
+			pwd = cachedPwd // 优先使用本地缓存的密码进行静默校验
+		}
+
 		for {
 			if pwd == "" {
 				pwd = askPassword()
@@ -150,13 +176,25 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 					realKey[i] = finalKey[i] ^ hash[i]
 				}
 				os.Setenv("GOSHIELD_PASSWORD", pwd)
+
+				// 密码正确且不在缓存中时，并且用户勾选了开启免密，将正确的密码写入授权文件
+				if rememberFlag == 1 && cachedPwd != pwd {
+					os.WriteFile(tokenFile, []byte(pwd), 0600)
+				}
 				break
 			} else {
 				if os.Getenv("GOSHIELD_SHADOW_PID") != "" {
 					return nil, fmt.Errorf("wrong password in shadow")
 				}
-				showErrorBox("密码错误，拒绝访问！")
-				pwd = "" // 密码错误，清空密码重新弹出 GUI 窗口
+				
+				if cachedPwd != "" && rememberFlag == 1 {
+					os.Remove(tokenFile)
+					cachedPwd = ""
+				} else {
+					showErrorBox("密码错误，拒绝访问！")
+				}
+				
+				pwd = "" // 密码错误，清空状态重新走循环弹出 GUI 窗口
 			}
 		}
 	}
