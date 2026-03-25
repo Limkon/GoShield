@@ -40,15 +40,28 @@ func main() {
 			file.Close()
 			os.Exit(1)
 		}
+		
 		fileSize := stat.Size()
-
 		footerSize := int64(48)
+		
+		// 🌟 修复点：加入 fileSize 的安全校验！避免编译报错，且提高稳定性
+		if fileSize < footerSize {
+			file.Close()
+			os.Exit(1)
+		}
+
 		file.Seek(-footerSize, io.SeekEnd)
 		footer := make([]byte, footerSize)
 		io.ReadFull(file, footer)
 
 		key := footer[0:32]
 		payloadSize := binary.LittleEndian.Uint64(footer[32:40])
+
+		// 🌟 修复点：校验载荷大小是否合法
+		if fileSize < footerSize+int64(payloadSize) {
+			file.Close()
+			os.Exit(1)
+		}
 
 		file.Seek(-(footerSize + int64(payloadSize)), io.SeekEnd)
 		encryptedPayload := make([]byte, payloadSize)
