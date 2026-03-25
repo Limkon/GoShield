@@ -24,25 +24,16 @@ import (
 )
 
 var (
-	kernel32                      = syscall.NewLazyDLL("kernel32.dll")
-	procOpenProcess               = kernel32.NewProc("OpenProcess")
-	procCloseHandle               = kernel32.NewProc("CloseHandle")
-	procTerminateProcess          = kernel32.NewProc("TerminateProcess")
-	procGetCurrentThreadId        = kernel32.NewProc("GetCurrentThreadId")
+	kernel32                  = syscall.NewLazyDLL("kernel32.dll")
+	procOpenProcess           = kernel32.NewProc("OpenProcess")
+	procWaitForSingleObject   = kernel32.NewProc("WaitForSingleObject")
+	procCloseHandle           = kernel32.NewProc("CloseHandle")
 
-	user32                        = syscall.NewLazyDLL("user32.dll")
-	procPeekMessageW              = user32.NewProc("PeekMessageW")
-	procMessageBoxW               = user32.NewProc("MessageBoxW")
-	procSystemParametersInfoW     = user32.NewProc("SystemParametersInfoW")
-	procSetWindowPos              = user32.NewProc("SetWindowPos")
-	procEnumWindows               = user32.NewProc("EnumWindows")
-	procGetWindowThreadProcessId  = user32.NewProc("GetWindowThreadProcessId")
-	procSetWinEventHook           = user32.NewProc("SetWinEventHook")
-	procUnhookWinEvent            = user32.NewProc("UnhookWinEvent")
-	procMsgWaitForMultipleObjects = user32.NewProc("MsgWaitForMultipleObjects")
-	procPostThreadMessageW        = user32.NewProc("PostThreadMessageW")
-	procTranslateMessage          = user32.NewProc("TranslateMessage")
-	procDispatchMessageW          = user32.NewProc("DispatchMessageW")
+	user32                    = syscall.NewLazyDLL("user32.dll")
+	procPeekMessageW          = user32.NewProc("PeekMessageW")
+	procMessageBoxW           = user32.NewProc("MessageBoxW")
+	procSystemParametersInfoW = user32.NewProc("SystemParametersInfoW")
+	procSetWindowPos          = user32.NewProc("SetWindowPos")
 )
 
 type MSG struct {
@@ -66,23 +57,7 @@ func showErrorBox(msg string) {
 	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(msgPtr)), uintptr(unsafe.Pointer(titlePtr)), 0x40010)
 }
 
-// 🌟 核心突破：只判断内存中是否存在目标 PID 的任何窗口（无论可见还是隐藏）
-// 完美兼容托盘程序，因为托盘程序必定有一个隐藏的顶级消息窗口
-func hasAnyWindow(pid uint32) bool {
-	var found bool
-	cb := syscall.NewCallback(func(hwnd syscall.Handle, lParam uintptr) uintptr {
-		var wpid uint32
-		procGetWindowThreadProcessId.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&wpid)))
-		if wpid == pid {
-			found = true
-			return 0 // 找到哪怕一个窗口对象，立刻停止枚举
-		}
-		return 1 // 继续枚举
-	})
-	procEnumWindows.Call(cb, 0)
-	return found
-}
-
+// 采用 MainWindow + 绝对坐标计算，完美实现右下角全局置顶
 func askPassword() string {
 	var mw *walk.MainWindow
 	var pwdTE *walk.LineEdit
@@ -121,6 +96,7 @@ func askPassword() string {
 	y := int(rect.Bottom) - 120 - 15
 
 	mw.SetBounds(walk.Rectangle{X: x, Y: y, Width: 320, Height: 120})
+	// HWND_TOPMOST (-1) 强制置顶
 	procSetWindowPos.Call(uintptr(mw.Handle()), ^uintptr(0), uintptr(x), uintptr(y), 0, 0, 0x0041)
 
 	mw.Run()
@@ -361,61 +337,14 @@ func main() {
 		protect.LockFile(originalExe)
 
 		targetPID, _ := strconv.Atoi(shadowPIDStr)
-		const accessRight = 0x00100000 | 0x0400 | 0x0001 // SYNCHRONIZE | QUERY | TERMINATE
-
-		tidPtr, _, _ := procGetCurrentThreadId.Call()
-		mainThreadId := uint32(tidPtr)
-
-		winEventCb := syscall.NewCallback(func(hWinEventHook syscall.Handle, event uint32, hwnd syscall.Handle, idObject int32, idChild int32, idEventThread uint32, dwmsEventTime uint32) uintptr {
-			if idObject == 0 { // 确认是窗口事件
-				procPostThreadMessageW.Call(uintptr(mainThreadId), 0x8000, 0, 0)
-			}
-			return 0
-		})
+		const accessRight = 0x00100000 | 0x0400 // SYNCHRONIZE | QUERY_INFORMATION
 
 		for {
 			hProcess, _, _ := procOpenProcess.Call(uintptr(accessRight), 0, uintptr(targetPID))
 			if hProcess != 0 {
-				windowAppeared := false
-
-				// 🌟 监听 0x8000 (创建) 到 0x8001 (销毁) 的系统事件，实现 0 轮询开销
-				hook, _, _ := procSetWinEventHook.Call(
-					0x8000, 0x8001,
-					0, winEventCb, uintptr(targetPID), 0, 0)
-
-				for {
-					// 线程深度挂起，绝不浪费 1 滴 CPU
-					res, _, _ := procMsgWaitForMultipleObjects.Call(1, uintptr(unsafe.Pointer(&hProcess)), 0, 0xFFFFFFFF, 0x04BF)
-					if res == 0 {
-						break // 进程物理死亡，直接跳出
-					}
-
-					var msg MSG
-					for {
-						hasMsg, _, _ := procPeekMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0, 1)
-						if hasMsg == 0 {
-							break
-						}
-						procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
-						procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
-					}
-
-					// 唤醒后：探测内存中是否还存在该进程的任意窗口对象（不论隐藏与否）
-					anyWin := hasAnyWindow(uint32(targetPID))
-					if anyWin {
-						windowAppeared = true // 托盘图标/隐藏窗口成功驻留内存
-					} else if windowAppeared && !anyWin {
-						// 🌟 核心突破口：曾经有窗口，现在物理内存中彻底销毁了 = 用户刚刚点击了退出！
-						break
-					}
-				}
-
-				if hook != 0 {
-					procUnhookWinEvent.Call(hook)
-				}
-
-				// 🌟 不等主进程磨蹭清理垃圾，直接物理斩杀！杜绝所有退出延迟！
-				procTerminateProcess.Call(hProcess, 0)
+				// 🌟 核心回归：放弃一切不稳定的窗口探测，直接在内核死等进程物理死亡。
+				// 绝对 0 消耗，绝对防误杀，绝对兼容任何形态的程序。
+				procWaitForSingleObject.Call(hProcess, 0xFFFFFFFF)
 				procCloseHandle.Call(hProcess)
 			} else {
 				time.Sleep(500 * time.Millisecond)
@@ -424,18 +353,20 @@ func main() {
 			exitUIPassed := false
 			hashHex := os.Getenv("GOSHIELD_EXIT_HASH")
 			if hashHex == "" {
-				exitUIPassed = true
+				exitUIPassed = true 
 			} else {
+				// 🌟 物理规律：此处会有约 1 秒的 Go GUI 初始化延迟，
+				// 这是为您呈现高质量原生输入框必须付出的框架启动成本。
 				cmd := exec.Command(originalExe)
 				cmd.Env = append(os.Environ(), "GOSHIELD_SHOW_EXIT_UI=1")
-				err := cmd.Run()
+				err := cmd.Run() 
 				if err == nil {
-					exitUIPassed = true
+					exitUIPassed = true 
 				}
 			}
 
 			if exitUIPassed {
-				break
+				break 
 			}
 
 			decryptedPayload, err := extractAndDecrypt(originalExe)
