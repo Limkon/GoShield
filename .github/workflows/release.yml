@@ -3,11 +3,7 @@ name: Build GoShield GUI Builder
 
 on:
   workflow_dispatch: # 允许在 Actions 页面手动触发运行
-  push:
-    branches:
-      - main
-      - master # 只要推送代码到主分支也会自动触发构建
-
+  
 jobs:
   build-windows:
     name: Build Builder on Windows
