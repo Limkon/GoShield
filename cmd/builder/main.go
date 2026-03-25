@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/lxn/walk"
-	. "github.com/lxn/walk/declarative" // 引入声明式 UI 语法
 	"github.com/Limkon/GoShield/internal/compiler"
 	"github.com/Limkon/GoShield/internal/crypto"
+	"github.com/lxn/walk"
+	. "github.com/lxn/walk/declarative" // 引入声明式 UI 语法
 )
 
 // appendLog 线程安全地向文本框中追加日志
@@ -20,7 +20,7 @@ func appendLog(logTE *walk.TextEdit, msg string) {
 
 func main() {
 	var mw *walk.MainWindow
-	var inTE, outTE *walk.LineEdit
+	var inTE, outTE, pwdTE *walk.LineEdit // 🌟 新增：密码输入框变量
 	var logTE *walk.TextEdit
 	var pb *walk.ProgressBar
 	var runBtn *walk.PushButton
@@ -28,7 +28,7 @@ func main() {
 	err := MainWindow{
 		AssignTo: &mw,
 		Title:    "GoShield - 终极 EXE 保护加壳系统",
-		MinSize:  Size{Width: 550, Height: 400},
+		MinSize:  Size{Width: 550, Height: 450}, // 稍微增高一点以适应新行
 		Layout:   VBox{},
 		Children: []Widget{
 			GroupBox{
@@ -63,6 +63,11 @@ func main() {
 							}
 						},
 					},
+
+					// 🌟 新增：密码输入行
+					Label{Text: "启动密码:"},
+					LineEdit{AssignTo: &pwdTE, PasswordMode: true}, // PasswordMode 隐藏输入字符
+					Label{Text: "(可选，留空则无密码保护)"},
 				},
 			},
 			Label{Text: "加壳与混淆进度:"},
@@ -82,13 +87,24 @@ func main() {
 				OnClicked: func() {
 					inFile := inTE.Text()
 					outFile := outTE.Text()
+					password := pwdTE.Text() // 🌟 获取用户填写的密码
 
 					if inFile == "" || outFile == "" {
 						walk.MsgBox(mw, "错误", "请先选择输入和输出文件路径！", walk.MsgBoxIconError)
 						return
 					}
 
-					// 禁用按钮并重置状态
+					fileInfo, err := os.Stat(inFile)
+					if err != nil {
+						walk.MsgBox(mw, "错误", "无法读取输入文件状态！", walk.MsgBoxIconError)
+						return
+					}
+					if fileInfo.Size() > 500*1024*1024 { // 限制最大 500MB
+						walk.MsgBox(mw, "警告", "目标文件过大（超过 500MB），一次性载入内存可能导致崩溃，请重新选择！", walk.MsgBoxIconWarning)
+						return
+					}
+
+					// 禁用按钮并重置状态 (在主线程执行，安全)
 					runBtn.SetEnabled(false)
 					logTE.SetText("")
 					pb.SetValue(0)
@@ -98,36 +114,40 @@ func main() {
 						defer mw.Synchronize(func() { runBtn.SetEnabled(true) })
 
 						appendLog(logTE, "[*] 读取原始可执行文件...")
-						mw.Synchronize(func() { pb.SetValue(20) })
+						mw.Synchronize(func() { pb.SetValue(10) })
 						plaintext, err := os.ReadFile(inFile)
 						if err != nil {
 							appendLog(logTE, fmt.Sprintf("[-] 失败: %v", err))
+							mw.Synchronize(func() { pb.SetValue(0) }) // 发生错误重置进度
 							return
 						}
 
 						appendLog(logTE, "[*] 动态生成 256-bit AES 混淆密钥...")
-						mw.Synchronize(func() { pb.SetValue(40) })
+						mw.Synchronize(func() { pb.SetValue(30) })
 						key, err := crypto.GenerateRandomKey()
 						if err != nil {
 							appendLog(logTE, fmt.Sprintf("[-] 失败: %v", err))
+							mw.Synchronize(func() { pb.SetValue(0) })
 							return
 						}
 
 						appendLog(logTE, "[*] 执行 AES-GCM 高级加密引擎...")
-						mw.Synchronize(func() { pb.SetValue(60) })
+						mw.Synchronize(func() { pb.SetValue(50) })
 						ciphertext, err := crypto.Encrypt(plaintext, key)
 						if err != nil {
 							appendLog(logTE, fmt.Sprintf("[-] 失败: %v", err))
+							mw.Synchronize(func() { pb.SetValue(0) })
 							return
 						}
 
 						appendLog(logTE, "[*] 正在执行无损图标注入与预编译壳拼接...")
-						mw.Synchronize(func() { pb.SetValue(80) })
+						mw.Synchronize(func() { pb.SetValue(70) })
 						
-						// 👇 关键修复点：这里传入了 inFile 作为第一个参数
-						err = compiler.BuildProtectedExe(inFile, ciphertext, key, outFile)
+						// 🌟 核心修改点：传入 password 参数
+						err = compiler.BuildProtectedExe(inFile, ciphertext, key, password, outFile)
 						if err != nil {
 							appendLog(logTE, fmt.Sprintf("[-] 编译失败: %v", err))
+							mw.Synchronize(func() { pb.SetValue(0) })
 							return
 						}
 
