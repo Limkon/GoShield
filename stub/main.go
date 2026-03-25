@@ -28,7 +28,7 @@ var (
 	procPeekMessageW          = user32.NewProc("PeekMessageW")
 	procMessageBoxW           = user32.NewProc("MessageBoxW")
 	procSystemParametersInfoW = user32.NewProc("SystemParametersInfoW")
-	procSetWindowPos          = user32.NewProc("SetWindowPos") // 🌟 新增：用于设置窗口强制置顶
+	procSetWindowPos          = user32.NewProc("SetWindowPos")
 )
 
 type MSG struct {
@@ -48,26 +48,43 @@ func stopLoadingCursor() {
 func showErrorBox(msg string) {
 	titlePtr, _ := syscall.UTF16PtrFromString("GoShield 安全拦截")
 	msgPtr, _ := syscall.UTF16PtrFromString(msg)
-	// 🌟 修复：0x10 (MB_ICONHAND) | 0x40000 (MB_TOPMOST) = 0x40010
-	// 确保错误弹窗也绝对置顶，不会被任何窗口遮挡
+	// 0x40010 = MB_TOPMOST (最上层) | MB_ICONHAND (错误图标)
 	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(msgPtr)), uintptr(unsafe.Pointer(titlePtr)), 0x40010)
 }
 
-// 🌟 深度优化：移动到右下角，并强制设置为全局最上层 (Topmost)
+// 🌟 终极修复：使用“双重锁死”策略强制压制窗口坐标与层级
 func setupDialogPlacement(dlg *walk.Dialog) {
 	var rect struct {
 		Left, Top, Right, Bottom int32
 	}
-	// 获取屏幕工作区大小（避开任务栏）
+	// 0x0030 = SPI_GETWORKAREA (获取除去任务栏的可用桌面空间)
 	procSystemParametersInfoW.Call(0x0030, 0, uintptr(unsafe.Pointer(&rect)), 0)
 
 	size := dlg.Size()
-	dlg.SetX(int(rect.Right) - size.Width - 15)
-	dlg.SetY(int(rect.Bottom) - size.Height - 15)
+	x := int(rect.Right) - int(size.Width) - 15
+	y := int(rect.Bottom) - int(size.Height) - 15
 
-	// HWND_TOPMOST = -1 (^uintptr(0)), SWP_NOMOVE | SWP_NOSIZE = 3
-	// 将窗口置于 Z 序的最顶层，实现“永远在最上层”
-	procSetWindowPos.Call(uintptr(dlg.Handle()), ^uintptr(0), 0, 0, 0, 0, 3)
+	// 1. 突破 walk 框架限制：提前设置坐标并显式调用 Show()
+	// 这能欺骗内部逻辑，让它跳过默认的居中计算代码
+	dlg.SetBounds(walk.Rectangle{X: int(x), Y: int(y), Width: size.Width, Height: size.Height})
+	dlg.Show()
+
+	// HWND_TOPMOST = -1 (^uintptr(0))
+	// 0x0041 = SWP_SHOWWINDOW (0x0040) | SWP_NOSIZE (0x0001)
+	
+	// 2. 第一层锁死：在当前线程立刻应用系统级置顶 API
+	procSetWindowPos.Call(uintptr(dlg.Handle()), ^uintptr(0), uintptr(x), uintptr(y), 0, 0, 0x0041)
+
+	// 3. 第二层锁死：等待消息循环正式启动后 (50ms)，如果框架发生了意外重绘，
+	// 再次强制钉回最上层右下角！彻底杜绝闪烁和层级丢失。
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		dlg.Synchronize(func() {
+			if dlg.Handle() != 0 {
+				procSetWindowPos.Call(uintptr(dlg.Handle()), ^uintptr(0), uintptr(x), uintptr(y), 0, 0, 0x0041)
+			}
+		})
+	}()
 }
 
 func askPassword() string {
@@ -100,7 +117,6 @@ func askPassword() string {
 		return ""
 	}
 
-	// 执行置顶和移动逻辑
 	setupDialogPlacement(dlg)
 	dlg.Run()
 
@@ -147,7 +163,6 @@ func verifyExitPassword() bool {
 		return false
 	}
 
-	// 执行置顶和移动逻辑
 	setupDialogPlacement(dlg)
 	dlg.Run()
 
@@ -167,7 +182,6 @@ func verifyExitPassword() bool {
 	}
 
 	if !match {
-		// 🌟 修复：按要求精简提示文案为“密码错误”
 		showErrorBox("密码错误")
 		return false
 	}
@@ -297,7 +311,6 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 					os.Remove(tokenFile)
 					cachedPwd = ""
 				} else {
-					// 🌟 修复：启动密码验证失败也统一提示“密码错误”
 					showErrorBox("密码错误")
 				}
 
