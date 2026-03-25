@@ -4,6 +4,7 @@ package compiler
 import (
 	_ "embed"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 )
@@ -15,13 +16,30 @@ var stubBase []byte
 
 // BuildProtectedExe 核心构建调度 (Overlay 附加注入模式)
 func BuildProtectedExe(originalExe string, encryptedData []byte, key []byte, outputExe string) error {
-	// 1. 将基础外壳释放为临时文件
-	// 为了防止 Windows API 破坏 Overlay 尾部数据，必须在拼装加密数据前注入图标
-	tmpExe := outputExe + ".tmp"
-	if err := os.WriteFile(tmpExe, stubBase, 0755); err != nil {
+	// 🌟 修复：校验 stubBase 是否合法
+	// PE 文件通常远大于 1KB，0 字节或过小则说明 stub 前置编译失败
+	if len(stubBase) < 1024 {
+		return errors.New("内置外壳 (stub_base.exe) 无效或损坏，请重新编译项目！")
+	}
+
+	// 🌟 修复：使用更安全的系统临时文件机制，防止目录权限问题或并发构建冲突
+	tmpFile, err := os.CreateTemp("", "goshield_stub_*.exe")
+	if err != nil {
+		return fmt.Errorf("无法创建临时外壳文件: %v", err)
+	}
+	tmpExe := tmpFile.Name()
+	
+	// 写入基础外壳数据
+	if _, err := tmpFile.Write(stubBase); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpExe)
 		return fmt.Errorf("释放临时外壳失败: %v", err)
 	}
-	defer os.Remove(tmpExe) // 处理完后自动销毁
+	
+	// 🌟 修复：必须显式关闭文件句柄解除系统占用锁，否则后续图标注入和重新读取会报错
+	tmpFile.Close() 
+
+	defer os.Remove(tmpExe) // 处理完后自动销毁系统临时文件
 
 	// 2. 自动化注入图标：从原程序完美克隆到临时外壳
 	CloneIcon(originalExe, tmpExe)
