@@ -30,12 +30,18 @@ func Encrypt(plaintext []byte, key []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	nonce := make([]byte, aesgcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+	nonceSize := aesgcm.NonceSize()
+	
+	// 🌟 修复/优化：预分配精确的容量，避免 Seal 内部二次分配大内存，极大降低 OOM 风险和 GC 压力
+	ciphertext := make([]byte, nonceSize, nonceSize+len(plaintext)+aesgcm.Overhead())
+	
+	// 填充随机 Nonce
+	if _, err := io.ReadFull(rand.Reader, ciphertext[:nonceSize]); err != nil {
 		return nil, err
 	}
 
-	ciphertext := aesgcm.Seal(nonce, nonce, plaintext, nil)
+	// 结果直接安全追加到预分配的 ciphertext 容量内
+	ciphertext = aesgcm.Seal(ciphertext, ciphertext[:nonceSize], plaintext, nil)
 	return ciphertext, nil
 }
 
@@ -56,8 +62,12 @@ func Decrypt(ciphertext []byte, key []byte) ([]byte, error) {
 		return nil, fmt.Errorf("ciphertext too short")
 	}
 
-	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
-	plaintext, err := aesgcm.Open(nil, nonce, ciphertext, nil)
+	nonce := ciphertext[:nonceSize]
+	actualCiphertext := ciphertext[nonceSize:]
+
+	// 🌟 修复/优化：利用底层重叠复用内存，进行原地解密 (In-place Decryption)
+	// 解密时不再申请等大的明文内存空间，大幅降低解密和加载期的内存峰值
+	plaintext, err := aesgcm.Open(actualCiphertext[:0], nonce, actualCiphertext, nil)
 	if err != nil {
 		return nil, err
 	}
