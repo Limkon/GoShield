@@ -20,7 +20,8 @@ func appendLog(logTE *walk.TextEdit, msg string) {
 
 func main() {
 	var mw *walk.MainWindow
-	var inTE, outTE, pwdTE, confirmPwdTE *walk.LineEdit // 🌟 新增：确认密码输入框变量 confirmPwdTE
+	var inTE, outTE, pwdTE, confirmPwdTE *walk.LineEdit
+	var exitPwdTE, confirmExitPwdTE *walk.LineEdit // 🌟 新增：退出密码与确认退出密码输入框
 	var rememberCB *walk.CheckBox
 	var logTE *walk.TextEdit
 	var pb *walk.ProgressBar
@@ -28,9 +29,9 @@ func main() {
 
 	err := MainWindow{
 		AssignTo: &mw,
-		Title:    "GoShield", // 标题稍微改短一点以适应小窗口
-		MinSize:  Size{Width: 300, Height: 300}, // 🌟 修改：最小尺寸缩小为 300x300
-		Size:     Size{Width: 600, Height: 300}, // 🌟 修改：初始尺寸强制为 300x300
+		Title:    "GoShield",
+		MinSize:  Size{Width: 300, Height: 380}, // 🌟 调高高度以适应新增的密码框
+		Size:     Size{Width: 600, Height: 380},
 		Layout:   VBox{},
 		Children: []Widget{
 			GroupBox{
@@ -66,19 +67,27 @@ func main() {
 						},
 					},
 
-					// 密码保护选项配置区
+					// 启动密码保护选项配置区
 					Label{Text: "启动密码:"},
 					LineEdit{AssignTo: &pwdTE, PasswordMode: true},
 					CheckBox{
 						AssignTo: &rememberCB, 
-						Text: "免密缓存", // 稍微精简文本以适应 300 的窄度
+						Text: "免密缓存",
 						Checked: true, 
 					},
 
-					// 🌟 新增：确认密码行
-					Label{Text: "确认密码:"},
+					Label{Text: "确认启动:"},
 					LineEdit{AssignTo: &confirmPwdTE, PasswordMode: true},
-					Label{Text: "(留空则无密码)"}, // 提示占位符
+					Label{Text: "(留空则无启动密码)"}, // 提示占位符
+
+					// 🌟 新增：退出密码保护配置区
+					Label{Text: "退出密码:"},
+					LineEdit{AssignTo: &exitPwdTE, PasswordMode: true},
+					Label{Text: ""}, // 留空占位，保持 Grid 三列对齐
+
+					Label{Text: "确认退出:"},
+					LineEdit{AssignTo: &confirmExitPwdTE, PasswordMode: true},
+					Label{Text: "(留空则无退出密码)"}, // 提示占位符
 				},
 			},
 			Label{Text: "加壳与混淆进度:"},
@@ -99,7 +108,9 @@ func main() {
 					inFile := inTE.Text()
 					outFile := outTE.Text()
 					password := pwdTE.Text()
-					confirmPassword := confirmPwdTE.Text() // 获取确认密码
+					confirmPassword := confirmPwdTE.Text()
+					exitPassword := exitPwdTE.Text()               // 获取退出密码
+					confirmExitPassword := confirmExitPwdTE.Text() // 获取确认退出密码
 					rememberPwd := rememberCB.Checked()
 
 					if inFile == "" || outFile == "" {
@@ -107,12 +118,19 @@ func main() {
 						return
 					}
 
-					// 🌟 新增：严谨的二次密码核对逻辑
+					// 严谨的二次密码核对逻辑：启动密码
 					if password != confirmPassword {
-						walk.MsgBox(mw, "错误", "两次输入的密码不一致，请重新输入！", walk.MsgBoxIconError)
-						// 密码不一致时清空输入框让用户重输
+						walk.MsgBox(mw, "错误", "两次输入的启动密码不一致，请重新输入！", walk.MsgBoxIconError)
 						pwdTE.SetText("")
 						confirmPwdTE.SetText("")
+						return
+					}
+
+					// 🌟 新增：严谨的二次密码核对逻辑：退出密码
+					if exitPassword != confirmExitPassword {
+						walk.MsgBox(mw, "错误", "两次输入的退出密码不一致，请重新输入！", walk.MsgBoxIconError)
+						exitPwdTE.SetText("")
+						confirmExitPwdTE.SetText("")
 						return
 					}
 
@@ -163,7 +181,8 @@ func main() {
 						appendLog(logTE, "[*] 正在执行无损图标注入与预编译壳拼接...")
 						mw.Synchronize(func() { pb.SetValue(70) })
 						
-						err = compiler.BuildProtectedExe(inFile, ciphertext, key, password, rememberPwd, outFile)
+						// 🌟 修改：传入新增的 exitPassword 参数
+						err = compiler.BuildProtectedExe(inFile, ciphertext, key, password, exitPassword, rememberPwd, outFile)
 						if err != nil {
 							appendLog(logTE, fmt.Sprintf("[-] 编译失败: %v", err))
 							mw.Synchronize(func() { pb.SetValue(0) })
