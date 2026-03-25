@@ -22,7 +22,7 @@ import (
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
-	"github.com/microsoft/go-winio"
+	"github.com/Microsoft/go-winio"
 )
 
 var (
