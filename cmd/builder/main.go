@@ -20,7 +20,8 @@ func appendLog(logTE *walk.TextEdit, msg string) {
 
 func main() {
 	var mw *walk.MainWindow
-	var inTE, outTE, pwdTE *walk.LineEdit // 🌟 新增：密码输入框变量
+	var inTE, outTE, pwdTE *walk.LineEdit
+	var rememberCB *walk.CheckBox // 🌟 新增：免密勾选框组件变量
 	var logTE *walk.TextEdit
 	var pb *walk.ProgressBar
 	var runBtn *walk.PushButton
@@ -28,7 +29,7 @@ func main() {
 	err := MainWindow{
 		AssignTo: &mw,
 		Title:    "GoShield - 终极 EXE 保护加壳系统",
-		MinSize:  Size{Width: 550, Height: 450}, // 稍微增高一点以适应新行
+		MinSize:  Size{Width: 550, Height: 450},
 		Layout:   VBox{},
 		Children: []Widget{
 			GroupBox{
@@ -64,10 +65,15 @@ func main() {
 						},
 					},
 
-					// 🌟 新增：密码输入行
+					// 密码保护选项配置区
 					Label{Text: "启动密码:"},
-					LineEdit{AssignTo: &pwdTE, PasswordMode: true}, // PasswordMode 隐藏输入字符
-					Label{Text: "(可选，留空则无密码保护)"},
+					LineEdit{AssignTo: &pwdTE, PasswordMode: true},
+					// 🌟 新增：将原来的提示文本替换为功能勾选框
+					CheckBox{
+						AssignTo: &rememberCB, 
+						Text: "仅首次需密码 (本机免密)",
+						Checked: true, // 默认勾选
+					},
 				},
 			},
 			Label{Text: "加壳与混淆进度:"},
@@ -87,7 +93,8 @@ func main() {
 				OnClicked: func() {
 					inFile := inTE.Text()
 					outFile := outTE.Text()
-					password := pwdTE.Text() // 🌟 获取用户填写的密码
+					password := pwdTE.Text()
+					rememberPwd := rememberCB.Checked() // 🌟 获取用户是否勾选了免密
 
 					if inFile == "" || outFile == "" {
 						walk.MsgBox(mw, "错误", "请先选择输入和输出文件路径！", walk.MsgBoxIconError)
@@ -99,17 +106,15 @@ func main() {
 						walk.MsgBox(mw, "错误", "无法读取输入文件状态！", walk.MsgBoxIconError)
 						return
 					}
-					if fileInfo.Size() > 500*1024*1024 { // 限制最大 500MB
+					if fileInfo.Size() > 500*1024*1024 {
 						walk.MsgBox(mw, "警告", "目标文件过大（超过 500MB），一次性载入内存可能导致崩溃，请重新选择！", walk.MsgBoxIconWarning)
 						return
 					}
 
-					// 禁用按钮并重置状态 (在主线程执行，安全)
 					runBtn.SetEnabled(false)
 					logTE.SetText("")
 					pb.SetValue(0)
 
-					// 开启后台协程处理加壳逻辑，防止阻塞 UI 线程
 					go func() {
 						defer mw.Synchronize(func() { runBtn.SetEnabled(true) })
 
@@ -118,7 +123,7 @@ func main() {
 						plaintext, err := os.ReadFile(inFile)
 						if err != nil {
 							appendLog(logTE, fmt.Sprintf("[-] 失败: %v", err))
-							mw.Synchronize(func() { pb.SetValue(0) }) // 发生错误重置进度
+							mw.Synchronize(func() { pb.SetValue(0) })
 							return
 						}
 
@@ -143,8 +148,8 @@ func main() {
 						appendLog(logTE, "[*] 正在执行无损图标注入与预编译壳拼接...")
 						mw.Synchronize(func() { pb.SetValue(70) })
 						
-						// 🌟 核心修改点：传入 password 参数
-						err = compiler.BuildProtectedExe(inFile, ciphertext, key, password, outFile)
+						// 🌟 核心修改点：将 rememberPwd (布尔值) 作为新参数传递给编译引擎
+						err = compiler.BuildProtectedExe(inFile, ciphertext, key, password, rememberPwd, outFile)
 						if err != nil {
 							appendLog(logTE, fmt.Sprintf("[-] 编译失败: %v", err))
 							mw.Synchronize(func() { pb.SetValue(0) })
@@ -167,6 +172,5 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 启动 UI 消息循环
 	mw.Run()
 }
