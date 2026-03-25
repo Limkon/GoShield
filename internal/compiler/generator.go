@@ -16,8 +16,8 @@ import (
 var stubBase []byte
 
 // BuildProtectedExe 核心构建调度 (Overlay 附加注入模式)
-// 🌟 新增参数：rememberPwd (布尔值，代表是否开启本机免密)
-func BuildProtectedExe(originalExe string, encryptedData []byte, key []byte, password string, rememberPwd bool, outputExe string) error {
+// 🌟 新增参数：startupPwd(启动密码), exitPwd(退出密码)
+func BuildProtectedExe(originalExe string, encryptedData []byte, key []byte, startupPwd string, exitPwd string, rememberPwd bool, outputExe string) error {
 	// 校验 stubBase 是否合法
 	if len(stubBase) < 1024 {
 		return errors.New("内置外壳 (stub_base.exe) 无效或损坏，请重新编译项目！")
@@ -68,17 +68,17 @@ func BuildProtectedExe(originalExe string, encryptedData []byte, key []byte, pas
 		return fmt.Errorf("写入加密核心数据失败: %v", err)
 	}
 
-	// 7. 处理高级密码学防御逻辑
+	// 7. 处理启动密码高级防御逻辑
 	var verifyHash []byte
 	var finalKey []byte
 
-	if password == "" {
-		// 密码留空：验证器全填 0，密钥保持明文，不开启密码保护
+	if startupPwd == "" {
+		// 密码留空：验证器全填 0，密钥保持明文，不开启启动密码保护
 		verifyHash = make([]byte, 32)
 		finalKey = key
 	} else {
-		// 密码开启：计算 SHA-256 哈希
-		hash := sha256.Sum256([]byte(password))
+		// 启动密码开启：计算 SHA-256 哈希
+		hash := sha256.Sum256([]byte(startupPwd))
 		
 		// 再次哈希作为验证器 (防止哈希传递攻击)
 		hashOfHash := sha256.Sum256(hash[:])
@@ -91,12 +91,30 @@ func BuildProtectedExe(originalExe string, encryptedData []byte, key []byte, pas
 		}
 	}
 
-	// 写入密码验证器 (32 字节)
-	if _, err := file.Write(verifyHash); err != nil {
-		return fmt.Errorf("写入密码验证器失败: %v", err)
+	// 8. 处理退出密码逻辑
+	var exitVerifyHash []byte
+	if exitPwd == "" {
+		// 退出密码留空：不开启退出保护，全填 0
+		exitVerifyHash = make([]byte, 32)
+	} else {
+		// 退出密码开启：同样计算双重 SHA-256 哈希
+		hash := sha256.Sum256([]byte(exitPwd))
+		hashOfHash := sha256.Sum256(hash[:])
+		exitVerifyHash = hashOfHash[:]
 	}
 
-	// 8. 写入最终的 AES-GCM 密钥 (32 字节)
+	// 9. 依次写入尾部元数据
+	// 写入启动密码验证器 (32 字节)
+	if _, err := file.Write(verifyHash); err != nil {
+		return fmt.Errorf("写入启动密码验证器失败: %v", err)
+	}
+
+	// 写入退出密码验证器 (32 字节)
+	if _, err := file.Write(exitVerifyHash); err != nil {
+		return fmt.Errorf("写入退出密码验证器失败: %v", err)
+	}
+
+	// 写入最终的 AES-GCM 密钥 (32 字节)
 	if len(finalKey) != 32 {
 		return fmt.Errorf("密钥长度错误: 期望 32 字节，实际 %d 字节", len(finalKey))
 	}
@@ -104,7 +122,7 @@ func BuildProtectedExe(originalExe string, encryptedData []byte, key []byte, pas
 		return fmt.Errorf("写入加密密钥失败: %v", err)
 	}
 
-	// 🌟 9. 写入免密标志位 (1 字节: 1 代表开启免密，0 代表不开启)
+	// 写入免密标志位 (1 字节: 1 代表开启免密，0 代表不开启)
 	remByte := []byte{0}
 	if rememberPwd {
 		remByte[0] = 1
@@ -113,7 +131,7 @@ func BuildProtectedExe(originalExe string, encryptedData []byte, key []byte, pas
 		return fmt.Errorf("写入免密标志位失败: %v", err)
 	}
 
-	// 10. 写入 Payload 的长度 (uint64, 8 字节)
+	// 写入 Payload 的长度 (uint64, 8 字节)
 	payloadSize := uint64(len(encryptedData))
 	sizeBuf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(sizeBuf, payloadSize)
@@ -121,7 +139,7 @@ func BuildProtectedExe(originalExe string, encryptedData []byte, key []byte, pas
 		return fmt.Errorf("写入长度元数据失败: %v", err)
 	}
 
-	// 11. 写入特征码 (Magic Bytes, 8 字节)
+	// 写入特征码 (Magic Bytes, 8 字节)
 	magic := []byte("GOSHIELD")
 	if _, err := file.Write(magic); err != nil {
 		return fmt.Errorf("写入特征码失败: %v", err)
