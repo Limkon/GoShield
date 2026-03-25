@@ -40,9 +40,9 @@ jobs:
       run: |
         mkdir build
         
-        echo "1. 正在强制获取最新代码所需的所有依赖..."
-        # 🌟 终极防丢补丁：在执行 go build 前的一瞬间，强制贴脸拉取 winio 库！
-        go get github.com/microsoft/go-winio
+        echo "1. 正在获取依赖..."
+        # 🌟 关键修复：大写的 Microsoft
+        go get github.com/Microsoft/go-winio
         go mod tidy
         
         echo "2. 正在编译底层防御外壳 (Stub)..."
