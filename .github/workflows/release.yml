@@ -1,7 +1,12 @@
+# 文件路径: .github/workflows/release.yml
 name: Build GoShield GUI Builder
 
 on:
   workflow_dispatch: # 允许在 Actions 页面手动触发运行
+  push:
+    branches:
+      - main
+      - master # 只要推送代码到主分支也会自动触发构建
 
 jobs:
   build-windows:
@@ -15,7 +20,7 @@ jobs:
     - name: Setup Go Environment
       uses: actions/setup-go@v5
       with:
-        go-version: '1.20' # 严格锁定 1.20，确保最终壳在 Win7 上完美运行
+        go-version: '1.20' # 严格锁定 1.20，确保最终壳在老系统上完美兼容运行
         cache: true
 
     - name: Install UI Dependencies & Prepare Manifest
@@ -34,7 +39,7 @@ jobs:
         go install github.com/akavel/rsrc@latest
         echo '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="Builder" type="win32"/><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/></dependentAssembly></dependency></assembly>' > cmd/builder/builder.manifest
         
-        # 🌟 修复Bug：加入严谨的容错机制。如果下载失败，通过 Base64 生成一个合法的 1x1 透明默认图标，防止构建崩溃
+        # 4. 加入严谨的容错机制。如果下载失败，通过 Base64 生成一个合法的 1x1 透明默认图标，防止构建崩溃
         if (!(Test-Path -Path "cmd/builder/app.ico")) {
             Write-Host "app.ico 图标文件不存在，尝试下载临时默认图标..."
             try {
@@ -46,30 +51,30 @@ jobs:
             }
         }
         
-        # 🌟 编译底层资源 (增加 -ico 参数)
+        # 5. 编译底层资源
         rsrc -manifest cmd/builder/builder.manifest -ico cmd/builder/app.ico -o cmd/builder/rsrc.syso
 
-    - name: Build GUI Builder Executable (Two-Step Build)
+    - name: Build GoShield (Two-Step Compilation)
       run: |
         mkdir build
         
-        # 第一步：预编译基础外壳 (Stub Base)
-        # 将编译产物输出到 internal/compiler/ 目录，覆盖之前的空占位文件
+        # 🌟 核心修复：两步编译法！
+        echo "1. 正在编译底层防御外壳 (Stub)..."
+        # 必须先编译 stub，生成含有最新密码框、防杀逻辑的真实 stub_base.exe 覆盖刚才的空文件
         go build -ldflags "-s -w -H=windowsgui" -o internal/compiler/stub_base.exe ./stub
         
-        # 第二步：编译完全独立的加壳机主程序 (Builder)
-        # 此时编译器会自动把刚生成的真实的 stub_base.exe 转换为字节流打包进 Builder 中
-        go build -ldflags "-s -w -H=windowsgui" -o build/Builder_Standalone.exe ./cmd/builder
+        echo "2. 正在编译加壳机主程序 (Builder)..."
+        # 此时 go build 会自动将刚才生成的真实 stub_base.exe 打包到构建器内部
+        go build -ldflags "-s -w -H=windowsgui" -o build/Builder.exe ./cmd/builder
 
     - name: Package Release Files
       run: |
-        # 架构重构红利：现在只需要发布这一个独立的 .exe 文件即可！
         mkdir release
-        cp build/Builder_Standalone.exe release/
+        cp build/Builder.exe release/
 
     - name: Upload GUI Release
       uses: actions/upload-artifact@v4
       with:
-        name: GoShield-GUI-Release
+        name: GoShield-Release
         path: release/
         compression-level: 6
