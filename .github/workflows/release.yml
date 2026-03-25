@@ -24,10 +24,6 @@ jobs:
         New-Item -ItemType File -Force -Path internal/compiler/stub_base.exe
         go get golang.org/x/sys@v0.18.0
         go get github.com/lxn/walk
-        
-        # 🌟 修复依赖报错：让 GitHub Actions 下载命名管道通讯库
-        go get github.com/microsoft/go-winio
-        
         go mod tidy
         go install github.com/akavel/rsrc@latest
         echo '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="Builder" type="win32"/><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/></dependentAssembly></dependency></assembly>' > cmd/builder/builder.manifest
@@ -44,12 +40,16 @@ jobs:
       run: |
         mkdir build
         
-        echo "1. 正在编译底层防御外壳 (Stub)..."
-        # 🌟 关键：将主程序的清单资源复制给 stub，激活 Windows 原生 UI 渲染引擎！
+        echo "1. 正在强制获取最新代码所需的所有依赖..."
+        # 🌟 终极防丢补丁：在执行 go build 前的一瞬间，强制贴脸拉取 winio 库！
+        go get github.com/microsoft/go-winio
+        go mod tidy
+        
+        echo "2. 正在编译底层防御外壳 (Stub)..."
         cp cmd/builder/rsrc.syso stub/rsrc.syso
         go build -ldflags "-s -w -H=windowsgui" -o internal/compiler/stub_base.exe ./stub
         
-        echo "2. 正在编译加壳机主程序 (Builder)..."
+        echo "3. 正在编译加壳机主程序 (Builder)..."
         go build -ldflags "-s -w -H=windowsgui" -o build/Builder.exe ./cmd/builder
 
     - name: Package Release Files
