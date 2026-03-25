@@ -31,23 +31,6 @@ GoShield 是一款基于 Go 语言开发的强大 Windows 可执行文件 (EXE) 
 ### 方案二：本地手动编译 (Windows 环境)
 如果您想在本地构建，请确保已安装 Go 1.20+，并在项目根目录依次执行以下命令：
 
-```cmd
-:: 1. 安装 Windows GUI 资源编译工具
-go install [github.com/akavel/rsrc@latest](https://github.com/akavel/rsrc@latest)
-
-:: 2. 生成 Manifest 和 图标资源文件
-echo ^<?xml version="1.0" encoding="UTF-8" standalone="yes"?^>^<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"^>^<assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="Builder" type="win32"/^>^<dependency^>^<dependentAssembly^>^<assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/^>^</dependentAssembly^>^</dependency^>^</assembly^> > cmd/builder/builder.manifest
-rsrc -manifest cmd/builder/builder.manifest -ico cmd/builder/app.ico -o cmd/builder/rsrc.syso
-
-:: 3. (关键!) 将 UI 资源复制给 Stub 以激活 Windows 原生界面渲染
-copy cmd\builder\rsrc.syso stub\rsrc.syso
-
-:: 4. 编译底层防御外壳 (Stub)
-go build -ldflags "-s -w -H=windowsgui" -o internal/compiler/stub_base.exe ./stub
-
-:: 5. 编译加壳机主程序 (Builder)
-go build -ldflags "-s -w -H=windowsgui" -o Builder.exe ./cmd/builder
-
 ###  ⚠️兼容性与最佳实践
 我们这套 GoShield 系统，由于采用了最硬核的 “不落地内存执行 + ASLR 动态重定位 + 系统白名单进程伪装”，它的免杀隐蔽性极强，但它最适合以下类型的原生 64 位单进程程序：
 
