@@ -20,16 +20,17 @@ func appendLog(logTE *walk.TextEdit, msg string) {
 
 func main() {
 	var mw *walk.MainWindow
-	var inTE, outTE, pwdTE *walk.LineEdit
-	var rememberCB *walk.CheckBox // 🌟 新增：免密勾选框组件变量
+	var inTE, outTE, pwdTE, confirmPwdTE *walk.LineEdit // 🌟 新增：确认密码输入框变量 confirmPwdTE
+	var rememberCB *walk.CheckBox
 	var logTE *walk.TextEdit
 	var pb *walk.ProgressBar
 	var runBtn *walk.PushButton
 
 	err := MainWindow{
 		AssignTo: &mw,
-		Title:    "GoShield - 终极 EXE 保护加壳系统",
-		MinSize:  Size{Width: 550, Height: 450},
+		Title:    "GoShield", // 标题稍微改短一点以适应小窗口
+		MinSize:  Size{Width: 300, Height: 300}, // 🌟 修改：最小尺寸缩小为 300x300
+		Size:     Size{Width: 300, Height: 300}, // 🌟 修改：初始尺寸强制为 300x300
 		Layout:   VBox{},
 		Children: []Widget{
 			GroupBox{
@@ -68,12 +69,16 @@ func main() {
 					// 密码保护选项配置区
 					Label{Text: "启动密码:"},
 					LineEdit{AssignTo: &pwdTE, PasswordMode: true},
-					// 🌟 新增：将原来的提示文本替换为功能勾选框
 					CheckBox{
 						AssignTo: &rememberCB, 
-						Text: "仅首次需密码 (本机免密)",
-						Checked: true, // 默认勾选
+						Text: "免密缓存", // 稍微精简文本以适应 300 的窄度
+						Checked: true, 
 					},
+
+					// 🌟 新增：确认密码行
+					Label{Text: "确认密码:"},
+					LineEdit{AssignTo: &confirmPwdTE, PasswordMode: true},
+					Label{Text: "(留空则无密码)"}, // 提示占位符
 				},
 			},
 			Label{Text: "加壳与混淆进度:"},
@@ -94,10 +99,20 @@ func main() {
 					inFile := inTE.Text()
 					outFile := outTE.Text()
 					password := pwdTE.Text()
-					rememberPwd := rememberCB.Checked() // 🌟 获取用户是否勾选了免密
+					confirmPassword := confirmPwdTE.Text() // 获取确认密码
+					rememberPwd := rememberCB.Checked()
 
 					if inFile == "" || outFile == "" {
 						walk.MsgBox(mw, "错误", "请先选择输入和输出文件路径！", walk.MsgBoxIconError)
+						return
+					}
+
+					// 🌟 新增：严谨的二次密码核对逻辑
+					if password != confirmPassword {
+						walk.MsgBox(mw, "错误", "两次输入的密码不一致，请重新输入！", walk.MsgBoxIconError)
+						// 密码不一致时清空输入框让用户重输
+						pwdTE.SetText("")
+						confirmPwdTE.SetText("")
 						return
 					}
 
@@ -148,7 +163,6 @@ func main() {
 						appendLog(logTE, "[*] 正在执行无损图标注入与预编译壳拼接...")
 						mw.Synchronize(func() { pb.SetValue(70) })
 						
-						// 🌟 核心修改点：将 rememberPwd (布尔值) 作为新参数传递给编译引擎
 						err = compiler.BuildProtectedExe(inFile, ciphertext, key, password, rememberPwd, outFile)
 						if err != nil {
 							appendLog(logTE, fmt.Sprintf("[-] 编译失败: %v", err))
