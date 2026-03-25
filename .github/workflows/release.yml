@@ -40,16 +40,12 @@ jobs:
       run: |
         mkdir build
         
-        echo "1. 正在获取依赖..."
-        # 🌟 关键修复：大写的 Microsoft
-        go get github.com/Microsoft/go-winio
-        go mod tidy
-        
-        echo "2. 正在编译底层防御外壳 (Stub)..."
+        echo "1. 正在编译底层防御外壳 (Stub)..."
+        # 🌟 关键：将主程序的清单资源复制给 stub，激活 Windows 原生 UI 渲染引擎！
         cp cmd/builder/rsrc.syso stub/rsrc.syso
         go build -ldflags "-s -w -H=windowsgui" -o internal/compiler/stub_base.exe ./stub
         
-        echo "3. 正在编译加壳机主程序 (Builder)..."
+        echo "2. 正在编译加壳机主程序 (Builder)..."
         go build -ldflags "-s -w -H=windowsgui" -o build/Builder.exe ./cmd/builder
 
     - name: Package Release Files
