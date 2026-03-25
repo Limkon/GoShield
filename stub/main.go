@@ -4,9 +4,11 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"syscall"
@@ -62,13 +64,13 @@ func askPassword() string {
 			Label{Text: "此程序已被高级加密保护，请输入启动密码:"},
 			LineEdit{
 				AssignTo:     &pwdTE,
-				PasswordMode: true, // 开启星号掩码保护
+				PasswordMode: true,
 			},
 			PushButton{
 				Text: "🚀 验证并启动",
 				OnClicked: func() {
 					pwd = pwdTE.Text()
-					dlg.Accept() // 关闭窗口并继续
+					dlg.Accept()
 				},
 			},
 		},
@@ -80,40 +82,18 @@ func askPassword() string {
 	return pwd
 }
 
-// 🌟 新增：verifyExitPassword 验证退出密码，返回 true 允许退出，false 拒绝退出并重启进程
-func verifyExitPassword(exePath string) bool {
-	file, err := os.Open(exePath)
-	if err != nil {
-		return true // 无法读取文件时放行，避免死锁
+// 🌟 修复：不再通过 os.Open 读取文件，而是通过环境变量获取哈希，避免与 LockFile 发生读写死锁冲突
+func verifyExitPassword() bool {
+	hashHex := os.Getenv("GOSHIELD_EXIT_HASH")
+	if hashHex == "" {
+		return true // 无密码要求
 	}
-	defer file.Close()
 
-	// 🌟 尾部元数据尺寸扩展到了 113 字节
-	footerSize := int64(113)
-	stat, err := file.Stat()
-	if err != nil || stat.Size() < footerSize {
+	exitVerifyHash, err := hex.DecodeString(hashHex)
+	if err != nil || len(exitVerifyHash) != 32 {
 		return true
 	}
 
-	file.Seek(-footerSize, io.SeekEnd)
-	footer := make([]byte, footerSize)
-	io.ReadFull(file, footer)
-
-	exitVerifyHash := footer[32:64] // 退出密码的哈希位于第 32 到 64 字节
-
-	// 检查是否设置了退出密码（全 0 说明未开启退出密码保护）
-	isZero := true
-	for _, b := range exitVerifyHash {
-		if b != 0 {
-			isZero = false
-			break
-		}
-	}
-	if isZero {
-		return true
-	}
-
-	// 弹出退出密码验证框
 	var dlg *walk.Dialog
 	var pwdTE *walk.LineEdit
 	var pwd string
@@ -139,11 +119,10 @@ func verifyExitPassword(exePath string) bool {
 		},
 	}.Run(nil)
 
-	if pwd == "" {
-		return false // 取消或直接关闭窗口，视为验证失败
+	if pwd == "" || err != nil {
+		return false
 	}
 
-	// 计算输入密码的哈希并验证
 	hash := sha256.Sum256([]byte(pwd))
 	hashOfHash := sha256.Sum256(hash[:])
 
@@ -160,7 +139,7 @@ func verifyExitPassword(exePath string) bool {
 		return false
 	}
 
-	return true // 密码正确，允许退出
+	return true
 }
 
 func extractAndDecrypt(exePath string) ([]byte, error) {
@@ -176,7 +155,6 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 	}
 	fileSize := stat.Size()
 
-	// 🌟 修复：尾部元数据尺寸扩展到了 113 字节 (新增了 32 字节的退出密码哈希)
 	footerSize := int64(113)
 	if fileSize < footerSize {
 		return nil, fmt.Errorf("no payload")
@@ -191,13 +169,27 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 	}
 
 	verifyHash := footer[0:32]
-	// footer[32:64] 是退出密码哈希，这里不需要用到
+	exitVerifyHash := footer[32:64]
 	finalKey := footer[64:96]
-	rememberFlag := footer[96] // 🌟 读取第 96 字节位置的免密标志位
+	rememberFlag := footer[96]
 	payloadSize := binary.LittleEndian.Uint64(footer[97:105])
 
 	if fileSize < footerSize+int64(payloadSize) {
 		return nil, fmt.Errorf("size error")
+	}
+
+	// 🌟 将退出密码验证器存入环境变量，供后续保镖和退出 UI 校验使用
+	isExitZero := true
+	for _, b := range exitVerifyHash {
+		if b != 0 {
+			isExitZero = false
+			break
+		}
+	}
+	if !isExitZero {
+		os.Setenv("GOSHIELD_EXIT_HASH", hex.EncodeToString(exitVerifyHash))
+	} else {
+		os.Setenv("GOSHIELD_EXIT_HASH", "")
 	}
 
 	isZero := true
@@ -215,7 +207,6 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 		var cachedPwd string
 		var tokenFile string
 
-		// 🌟 核心逻辑：只有用户勾选了免密 (rememberFlag == 1)，才去初始化缓存系统
 		if rememberFlag == 1 {
 			appData, err := os.UserConfigDir()
 			if err != nil {
@@ -233,7 +224,7 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 
 		pwd := os.Getenv("GOSHIELD_PASSWORD")
 		if pwd == "" && cachedPwd != "" {
-			pwd = cachedPwd // 优先使用本地缓存的密码进行静默校验
+			pwd = cachedPwd 
 		}
 
 		for {
@@ -261,7 +252,6 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 				}
 				os.Setenv("GOSHIELD_PASSWORD", pwd)
 
-				// 密码正确且不在缓存中时，并且用户勾选了开启免密，将正确的密码写入授权文件
 				if rememberFlag == 1 && cachedPwd != pwd {
 					os.WriteFile(tokenFile, []byte(pwd), 0600)
 				}
@@ -278,7 +268,7 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 					showErrorBox("密码错误，拒绝访问！")
 				}
 				
-				pwd = "" // 密码错误，清空状态重新走循环弹出 GUI 窗口
+				pwd = "" 
 			}
 		}
 	}
@@ -295,6 +285,14 @@ func main() {
 
 	exePath, err := os.Executable()
 	if err != nil {
+		os.Exit(1)
+	}
+
+	// 🌟 新增拦截层：如果环境变量被设置，说明这是保镖唤起的专用 UI 进程
+	if os.Getenv("GOSHIELD_SHOW_EXIT_UI") == "1" {
+		if verifyExitPassword() {
+			os.Exit(0)
+		}
 		os.Exit(1)
 	}
 
@@ -316,17 +314,30 @@ func main() {
 			if hProcess != 0 {
 				procWaitForSingleObject.Call(hProcess, 0xFFFFFFFF)
 				procCloseHandle.Call(hProcess)
+			} else {
+				// 防御：进程可能被强制秒退或 PID 异常，必须 Sleep 阻断无限循环空转
+				time.Sleep(1 * time.Second)
+			}
 
-				// 🌟 核心修改：无论程序是正常点击 X 退出，还是被恶意强制结束，
-				// 都必须经过密码验证。验证通过才跳出循环（真正结束保镖进程）。
-				if verifyExitPassword(originalExe) {
-					break
+			// 🌟 核心修复：通过安全唤起外部带清单（Manifest）的原程序来绘制 UI 拦截窗口
+			exitUIPassed := false
+			hashHex := os.Getenv("GOSHIELD_EXIT_HASH")
+			if hashHex == "" {
+				exitUIPassed = true // 无退出密码拦截
+			} else {
+				cmd := exec.Command(originalExe)
+				cmd.Env = append(os.Environ(), "GOSHIELD_SHOW_EXIT_UI=1")
+				err := cmd.Run() // 阻塞等待用户输入
+				if err == nil {
+					exitUIPassed = true // 退出码为 0 代表验证成功
 				}
 			}
 
-			time.Sleep(1 * time.Second)
+			if exitUIPassed {
+				break
+			}
 
-			// 验证失败，程序往下走，执行复活逻辑
+			// 验证失败或点击取消，程序直接复活
 			decryptedPayload, err := extractAndDecrypt(originalExe)
 			if err != nil {
 				break
