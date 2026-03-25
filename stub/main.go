@@ -1,152 +1,167 @@
-// 文件路径: stub/main.go
+// 文件路径: cmd/builder/main.go
 package main
 
 import (
-	"encoding/binary"
 	"fmt"
-	"io"
 	"os"
-	"strconv"
-	"syscall"
-	"unsafe"
 
+	"github.com/lxn/walk"
+	. "github.com/lxn/walk/declarative" // 引入声明式 UI 语法
+	"github.com/Limkon/GoShield/internal/compiler"
 	"github.com/Limkon/GoShield/internal/crypto"
-	"github.com/Limkon/GoShield/internal/loader"
-	"github.com/Limkon/GoShield/internal/protect"
 )
 
-var (
-	user32           = syscall.NewLazyDLL("user32.dll")
-	procPeekMessageW = user32.NewProc("PeekMessageW")
-)
-
-// MSG Windows 消息结构体
-type MSG struct {
-	Hwnd    syscall.Handle
-	Message uint32
-	WParam  uintptr
-	LParam  uintptr
-	Time    uint32
-	Pt      struct{ X, Y int32 }
-}
-
-// 🌟 核心提速修复：强行消除 Windows 的鼠标转圈等待状态
-func stopLoadingCursor() {
-	var msg MSG
-	// 强行调用一次 PeekMessage，Windows 收到反馈后会立刻取消“AppStarting”鼠标等待状态
-	procPeekMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0, 1) // 1 = PM_REMOVE
-}
-
-// extractAndDecrypt 提取并解密 Payload 的复用核心函数
-func extractAndDecrypt(exePath string) ([]byte, error) {
-	file, err := os.Open(exePath)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	stat, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	fileSize := stat.Size()
-
-	footerSize := int64(48)
-	if fileSize < footerSize {
-		return nil, fmt.Errorf("no payload")
-	}
-
-	file.Seek(-footerSize, io.SeekEnd)
-	footer := make([]byte, footerSize)
-	io.ReadFull(file, footer)
-
-	if string(footer[40:48]) != "GOSHIELD" {
-		return nil, fmt.Errorf("magic error")
-	}
-
-	key := footer[0:32]
-	payloadSize := binary.LittleEndian.Uint64(footer[32:40])
-
-	if fileSize < footerSize+int64(payloadSize) {
-		return nil, fmt.Errorf("size error")
-	}
-
-	file.Seek(-(footerSize + int64(payloadSize)), io.SeekEnd)
-	encryptedPayload := make([]byte, payloadSize)
-	io.ReadFull(file, encryptedPayload)
-
-	return crypto.Decrypt(encryptedPayload, key)
+// appendLog 线程安全地向文本框中追加日志
+func appendLog(logTE *walk.TextEdit, msg string) {
+	logTE.Synchronize(func() {
+		logTE.AppendText(msg + "\r\n")
+	})
 }
 
 func main() {
-	// 🌟 第一时间调用！让鼠标连 0.1 秒的转圈都不会有！
-	stopLoadingCursor()
+	var mw *walk.MainWindow
+	var inTE, outTE *walk.LineEdit
+	var logTE *walk.TextEdit
+	var pb *walk.ProgressBar
+	var runBtn *walk.PushButton
 
-	exePath, err := os.Executable()
+	err := MainWindow{
+		AssignTo: &mw,
+		Title:    "GoShield - 终极 EXE 保护加壳系统",
+		MinSize:  Size{Width: 550, Height: 400},
+		Layout:   VBox{},
+		Children: []Widget{
+			GroupBox{
+				Title:  "目标文件配置",
+				Layout: Grid{Columns: 3},
+				Children: []Widget{
+					Label{Text: "原始程序:"},
+					LineEdit{AssignTo: &inTE, ReadOnly: true},
+					PushButton{
+						Text: "浏览...",
+						OnClicked: func() {
+							dlg := new(walk.FileDialog)
+							dlg.Filter = "可执行文件 (*.exe)|*.exe|所有文件 (*.*)|*.*"
+							dlg.Title = "选择需要加壳保护的 EXE"
+							if ok, _ := dlg.ShowOpen(mw); ok {
+								inTE.SetText(dlg.FilePath)
+								outTE.SetText(dlg.FilePath[:len(dlg.FilePath)-4] + "_protected.exe")
+							}
+						},
+					},
+
+					Label{Text: "输出路径:"},
+					LineEdit{AssignTo: &outTE},
+					PushButton{
+						Text: "浏览...",
+						OnClicked: func() {
+							dlg := new(walk.FileDialog)
+							dlg.Filter = "可执行文件 (*.exe)|*.exe"
+							dlg.Title = "保存保护后的 EXE"
+							if ok, _ := dlg.ShowSave(mw); ok {
+								outTE.SetText(dlg.FilePath)
+							}
+						},
+					},
+				},
+			},
+			Label{Text: "加壳与混淆进度:"},
+			ProgressBar{
+				AssignTo: &pb,
+				MinValue: 0,
+				MaxValue: 100,
+			},
+			TextEdit{
+				AssignTo: &logTE,
+				ReadOnly: true,
+				VScroll:  true,
+			},
+			PushButton{
+				AssignTo: &runBtn,
+				Text:     "⚡ 开始加壳保护",
+				OnClicked: func() {
+					inFile := inTE.Text()
+					outFile := outTE.Text()
+
+					if inFile == "" || outFile == "" {
+						walk.MsgBox(mw, "错误", "请先选择输入和输出文件路径！", walk.MsgBoxIconError)
+						return
+					}
+
+					// 🌟 修复：增加文件大小校验，防止超大文件直接读入导致 OOM 崩溃
+					fileInfo, err := os.Stat(inFile)
+					if err != nil {
+						walk.MsgBox(mw, "错误", "无法读取输入文件状态！", walk.MsgBoxIconError)
+						return
+					}
+					if fileInfo.Size() > 500*1024*1024 { // 限制最大 500MB
+						walk.MsgBox(mw, "警告", "目标文件过大（超过 500MB），一次性载入内存可能导致崩溃，请重新选择！", walk.MsgBoxIconWarning)
+						return
+					}
+
+					// 禁用按钮并重置状态 (在主线程执行，安全)
+					runBtn.SetEnabled(false)
+					logTE.SetText("")
+					pb.SetValue(0)
+
+					// 开启后台协程处理加壳逻辑，防止阻塞 UI 线程
+					go func() {
+						defer mw.Synchronize(func() { runBtn.SetEnabled(true) })
+
+						appendLog(logTE, "[*] 读取原始可执行文件...")
+						mw.Synchronize(func() { pb.SetValue(10) })
+						plaintext, err := os.ReadFile(inFile)
+						if err != nil {
+							appendLog(logTE, fmt.Sprintf("[-] 失败: %v", err))
+							mw.Synchronize(func() { pb.SetValue(0) }) // 发生错误重置进度
+							return
+						}
+
+						appendLog(logTE, "[*] 动态生成 256-bit AES 混淆密钥...")
+						mw.Synchronize(func() { pb.SetValue(30) })
+						key, err := crypto.GenerateRandomKey()
+						if err != nil {
+							appendLog(logTE, fmt.Sprintf("[-] 失败: %v", err))
+							mw.Synchronize(func() { pb.SetValue(0) })
+							return
+						}
+
+						appendLog(logTE, "[*] 执行 AES-GCM 高级加密引擎...")
+						mw.Synchronize(func() { pb.SetValue(50) })
+						ciphertext, err := crypto.Encrypt(plaintext, key)
+						if err != nil {
+							appendLog(logTE, fmt.Sprintf("[-] 失败: %v", err))
+							mw.Synchronize(func() { pb.SetValue(0) })
+							return
+						}
+
+						appendLog(logTE, "[*] 正在执行无损图标注入与预编译壳拼接...")
+						mw.Synchronize(func() { pb.SetValue(70) })
+						
+						// 👇 传入 inFile 作为第一个参数
+						err = compiler.BuildProtectedExe(inFile, ciphertext, key, outFile)
+						if err != nil {
+							appendLog(logTE, fmt.Sprintf("[-] 编译失败: %v", err))
+							mw.Synchronize(func() { pb.SetValue(0) })
+							return
+						}
+
+						mw.Synchronize(func() { pb.SetValue(100) })
+						appendLog(logTE, fmt.Sprintf("[+] 加壳成功！\r\n[+] 带壳程序已安全保存至: %s", outFile))
+						
+						mw.Synchronize(func() {
+							walk.MsgBox(mw, "成功", "程序加壳与底层保护植入完成！\n原程序图标已完美继承，您可以测试运行了。", walk.MsgBoxIconInformation)
+						})
+					}()
+				},
+			},
+		},
+	}.Create()
+
 	if err != nil {
 		os.Exit(1)
 	}
 
-	// 1. 终极分流：判断当前是否是潜伏在 svchost.exe 中的幽灵保镖
-	shadowPIDStr := os.Getenv("GOSHIELD_SHADOW_PID")
-	if shadowPIDStr != "" {
-		// === 幽灵保镖逻辑 ===
-		protect.ProtectProcess()
-		originalExe := os.Getenv("GOSHIELD_ORIGINAL_EXE")
-		protect.LockFile(originalExe)
-
-		targetPID, _ := strconv.Atoi(shadowPIDStr)
-		
-		kernel32 := syscall.NewLazyDLL("kernel32.dll")
-		procOpenProcess := kernel32.NewProc("OpenProcess")
-		procWaitForSingleObject := kernel32.NewProc("WaitForSingleObject")
-		procGetExitCodeProcess := kernel32.NewProc("GetExitCodeProcess")
-		procCloseHandle := kernel32.NewProc("CloseHandle")
-
-		for {
-			hProcess, _, _ := procOpenProcess.Call(0x00100000|0x0400, 0, uintptr(targetPID))
-			if hProcess != 0 {
-				procWaitForSingleObject.Call(hProcess, 0xFFFFFFFF)
-				var exitCode uint32
-				procGetExitCodeProcess.Call(hProcess, uintptr(unsafe.Pointer(&exitCode)))
-				procCloseHandle.Call(hProcess)
-
-				if exitCode == 0 {
-					break
-				}
-			}
-
-			decryptedPayload, err := extractAndDecrypt(originalExe)
-			if err != nil {
-				break
-			}
-			
-			newPID, err := loader.ExecuteAsync(originalExe, decryptedPayload)
-			if err != nil {
-				break
-			}
-			targetPID = int(newPID)
-		}
-		os.Exit(0)
-	}
-
-	// === 原始父进程逻辑 ===
-	decryptedPayload, err := extractAndDecrypt(exePath)
-	if err != nil {
-		os.Exit(1)
-	}
-
-	payloadPID, err := loader.ExecuteAsync(exePath, decryptedPayload)
-	if err != nil {
-		os.Exit(1)
-	}
-
-	myExeBytes, err := os.ReadFile(exePath)
-	if err == nil {
-		os.Setenv("GOSHIELD_SHADOW_PID", strconv.Itoa(int(payloadPID)))
-		os.Setenv("GOSHIELD_ORIGINAL_EXE", exePath)
-		loader.ExecuteAsync("C:\\Windows\\System32\\svchost.exe", myExeBytes)
-	}
-
-	os.Exit(0)
+	// 启动 UI 消息循环
+	mw.Run()
 }
