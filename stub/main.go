@@ -27,7 +27,8 @@ var (
 	user32                    = syscall.NewLazyDLL("user32.dll")
 	procPeekMessageW          = user32.NewProc("PeekMessageW")
 	procMessageBoxW           = user32.NewProc("MessageBoxW")
-	procSystemParametersInfoW = user32.NewProc("SystemParametersInfoW") // 🌟 新增：用于获取屏幕工作区大小
+	procSystemParametersInfoW = user32.NewProc("SystemParametersInfoW")
+	procSetWindowPos          = user32.NewProc("SetWindowPos") // 🌟 新增：用于设置窗口强制置顶
 )
 
 type MSG struct {
@@ -47,21 +48,26 @@ func stopLoadingCursor() {
 func showErrorBox(msg string) {
 	titlePtr, _ := syscall.UTF16PtrFromString("GoShield 安全拦截")
 	msgPtr, _ := syscall.UTF16PtrFromString(msg)
-	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(msgPtr)), uintptr(unsafe.Pointer(titlePtr)), 0x10)
+	// 🌟 修复：0x10 (MB_ICONHAND) | 0x40000 (MB_TOPMOST) = 0x40010
+	// 确保错误弹窗也绝对置顶，不会被任何窗口遮挡
+	procMessageBoxW.Call(0, uintptr(unsafe.Pointer(msgPtr)), uintptr(unsafe.Pointer(titlePtr)), 0x40010)
 }
 
-// 🌟 新增核心功能：将指定窗口精准移动到屏幕右下角（自动避开任务栏）
-func moveToBottomRight(dlg *walk.Dialog) {
+// 🌟 深度优化：移动到右下角，并强制设置为全局最上层 (Topmost)
+func setupDialogPlacement(dlg *walk.Dialog) {
 	var rect struct {
 		Left, Top, Right, Bottom int32
 	}
-	// SPI_GETWORKAREA = 0x0030，获取除去任务栏以外的桌面可用空间
+	// 获取屏幕工作区大小（避开任务栏）
 	procSystemParametersInfoW.Call(0x0030, 0, uintptr(unsafe.Pointer(&rect)), 0)
 
 	size := dlg.Size()
-	// 右下角定位，保留 15 像素的安全边距，显得更美观
 	dlg.SetX(int(rect.Right) - size.Width - 15)
 	dlg.SetY(int(rect.Bottom) - size.Height - 15)
+
+	// HWND_TOPMOST = -1 (^uintptr(0)), SWP_NOMOVE | SWP_NOSIZE = 3
+	// 将窗口置于 Z 序的最顶层，实现“永远在最上层”
+	procSetWindowPos.Call(uintptr(dlg.Handle()), ^uintptr(0), 0, 0, 0, 0, 3)
 }
 
 func askPassword() string {
@@ -69,7 +75,6 @@ func askPassword() string {
 	var pwdTE *walk.LineEdit
 	var pwd string
 
-	// 🌟 修复：将 Run() 拆分为 Create()，以便在显示前操作坐标
 	err := Dialog{
 		AssignTo: &dlg,
 		Title:    "安全验证",
@@ -95,8 +100,8 @@ func askPassword() string {
 		return ""
 	}
 
-	// 将弹窗移动到右下角后，再开始阻塞运行
-	moveToBottomRight(dlg)
+	// 执行置顶和移动逻辑
+	setupDialogPlacement(dlg)
 	dlg.Run()
 
 	return pwd
@@ -142,8 +147,8 @@ func verifyExitPassword() bool {
 		return false
 	}
 
-	// 同样，退出拦截窗口也移动到右下角
-	moveToBottomRight(dlg)
+	// 执行置顶和移动逻辑
+	setupDialogPlacement(dlg)
 	dlg.Run()
 
 	if pwd == "" {
@@ -162,7 +167,8 @@ func verifyExitPassword() bool {
 	}
 
 	if !match {
-		showErrorBox("退出密码错误，程序将被强制重启！")
+		// 🌟 修复：按要求精简提示文案为“密码错误”
+		showErrorBox("密码错误")
 		return false
 	}
 
@@ -291,7 +297,8 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 					os.Remove(tokenFile)
 					cachedPwd = ""
 				} else {
-					showErrorBox("密码错误，拒绝访问！")
+					// 🌟 修复：启动密码验证失败也统一提示“密码错误”
+					showErrorBox("密码错误")
 				}
 
 				pwd = ""
