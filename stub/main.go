@@ -1,167 +1,52 @@
-// 文件路径: cmd/builder/main.go
-package main
+// 文件路径: internal/protect/anti_delete.go
+package protect
 
 import (
-	"fmt"
 	"os"
-
-	"github.com/lxn/walk"
-	. "github.com/lxn/walk/declarative" // 引入声明式 UI 语法
-	"github.com/Limkon/GoShield/internal/compiler"
-	"github.com/Limkon/GoShield/internal/crypto"
+	"sync"
+	"syscall"
 )
 
-// appendLog 线程安全地向文本框中追加日志
-func appendLog(logTE *walk.TextEdit, msg string) {
-	logTE.Synchronize(func() {
-		logTE.AppendText(msg + "\r\n")
-	})
-}
+var (
+	lockedHandles []syscall.Handle
+	lockMu        sync.Mutex
+)
 
-func main() {
-	var mw *walk.MainWindow
-	var inTE, outTE *walk.LineEdit
-	var logTE *walk.TextEdit
-	var pb *walk.ProgressBar
-	var runBtn *walk.PushButton
-
-	err := MainWindow{
-		AssignTo: &mw,
-		Title:    "GoShield - 终极 EXE 保护加壳系统",
-		MinSize:  Size{Width: 550, Height: 400},
-		Layout:   VBox{},
-		Children: []Widget{
-			GroupBox{
-				Title:  "目标文件配置",
-				Layout: Grid{Columns: 3},
-				Children: []Widget{
-					Label{Text: "原始程序:"},
-					LineEdit{AssignTo: &inTE, ReadOnly: true},
-					PushButton{
-						Text: "浏览...",
-						OnClicked: func() {
-							dlg := new(walk.FileDialog)
-							dlg.Filter = "可执行文件 (*.exe)|*.exe|所有文件 (*.*)|*.*"
-							dlg.Title = "选择需要加壳保护的 EXE"
-							if ok, _ := dlg.ShowOpen(mw); ok {
-								inTE.SetText(dlg.FilePath)
-								outTE.SetText(dlg.FilePath[:len(dlg.FilePath)-4] + "_protected.exe")
-							}
-						},
-					},
-
-					Label{Text: "输出路径:"},
-					LineEdit{AssignTo: &outTE},
-					PushButton{
-						Text: "浏览...",
-						OnClicked: func() {
-							dlg := new(walk.FileDialog)
-							dlg.Filter = "可执行文件 (*.exe)|*.exe"
-							dlg.Title = "保存保护后的 EXE"
-							if ok, _ := dlg.ShowSave(mw); ok {
-								outTE.SetText(dlg.FilePath)
-							}
-						},
-					},
-				},
-			},
-			Label{Text: "加壳与混淆进度:"},
-			ProgressBar{
-				AssignTo: &pb,
-				MinValue: 0,
-				MaxValue: 100,
-			},
-			TextEdit{
-				AssignTo: &logTE,
-				ReadOnly: true,
-				VScroll:  true,
-			},
-			PushButton{
-				AssignTo: &runBtn,
-				Text:     "⚡ 开始加壳保护",
-				OnClicked: func() {
-					inFile := inTE.Text()
-					outFile := outTE.Text()
-
-					if inFile == "" || outFile == "" {
-						walk.MsgBox(mw, "错误", "请先选择输入和输出文件路径！", walk.MsgBoxIconError)
-						return
-					}
-
-					// 🌟 修复：增加文件大小校验，防止超大文件直接读入导致 OOM 崩溃
-					fileInfo, err := os.Stat(inFile)
-					if err != nil {
-						walk.MsgBox(mw, "错误", "无法读取输入文件状态！", walk.MsgBoxIconError)
-						return
-					}
-					if fileInfo.Size() > 500*1024*1024 { // 限制最大 500MB
-						walk.MsgBox(mw, "警告", "目标文件过大（超过 500MB），一次性载入内存可能导致崩溃，请重新选择！", walk.MsgBoxIconWarning)
-						return
-					}
-
-					// 禁用按钮并重置状态 (在主线程执行，安全)
-					runBtn.SetEnabled(false)
-					logTE.SetText("")
-					pb.SetValue(0)
-
-					// 开启后台协程处理加壳逻辑，防止阻塞 UI 线程
-					go func() {
-						defer mw.Synchronize(func() { runBtn.SetEnabled(true) })
-
-						appendLog(logTE, "[*] 读取原始可执行文件...")
-						mw.Synchronize(func() { pb.SetValue(10) })
-						plaintext, err := os.ReadFile(inFile)
-						if err != nil {
-							appendLog(logTE, fmt.Sprintf("[-] 失败: %v", err))
-							mw.Synchronize(func() { pb.SetValue(0) }) // 发生错误重置进度
-							return
-						}
-
-						appendLog(logTE, "[*] 动态生成 256-bit AES 混淆密钥...")
-						mw.Synchronize(func() { pb.SetValue(30) })
-						key, err := crypto.GenerateRandomKey()
-						if err != nil {
-							appendLog(logTE, fmt.Sprintf("[-] 失败: %v", err))
-							mw.Synchronize(func() { pb.SetValue(0) })
-							return
-						}
-
-						appendLog(logTE, "[*] 执行 AES-GCM 高级加密引擎...")
-						mw.Synchronize(func() { pb.SetValue(50) })
-						ciphertext, err := crypto.Encrypt(plaintext, key)
-						if err != nil {
-							appendLog(logTE, fmt.Sprintf("[-] 失败: %v", err))
-							mw.Synchronize(func() { pb.SetValue(0) })
-							return
-						}
-
-						appendLog(logTE, "[*] 正在执行无损图标注入与预编译壳拼接...")
-						mw.Synchronize(func() { pb.SetValue(70) })
-						
-						// 👇 传入 inFile 作为第一个参数
-						err = compiler.BuildProtectedExe(inFile, ciphertext, key, outFile)
-						if err != nil {
-							appendLog(logTE, fmt.Sprintf("[-] 编译失败: %v", err))
-							mw.Synchronize(func() { pb.SetValue(0) })
-							return
-						}
-
-						mw.Synchronize(func() { pb.SetValue(100) })
-						appendLog(logTE, fmt.Sprintf("[+] 加壳成功！\r\n[+] 带壳程序已安全保存至: %s", outFile))
-						
-						mw.Synchronize(func() {
-							walk.MsgBox(mw, "成功", "程序加壳与底层保护植入完成！\n原程序图标已完美继承，您可以测试运行了。", walk.MsgBoxIconInformation)
-						})
-					}()
-				},
-			},
-		},
-	}.Create()
-
+// LockFile 独占锁定指定路径的文件
+func LockFile(targetPath string) error {
+	pathPtr, err := syscall.UTF16PtrFromString(targetPath)
 	if err != nil {
-		os.Exit(1)
+		return err
 	}
 
-	// 启动 UI 消息循环
-	mw.Run()
+	// 允许读取 (FILE_SHARE_READ)，坚决拒绝其他进程写入和删除
+	handle, err := syscall.CreateFile(
+		pathPtr,
+		syscall.GENERIC_READ,
+		syscall.FILE_SHARE_READ,
+		nil,
+		syscall.OPEN_EXISTING,
+		syscall.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	// 🌟 修复：使用切片和互斥锁保存所有句柄，防止多次调用时变量覆盖导致控制权丢失
+	lockMu.Lock()
+	lockedHandles = append(lockedHandles, handle)
+	lockMu.Unlock()
+
+	return nil
+}
+
+// LockSelfFile 锁定自身
+func LockSelfFile() error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return LockFile(exePath)
 }
