@@ -80,6 +80,89 @@ func askPassword() string {
 	return pwd
 }
 
+// 🌟 新增：verifyExitPassword 验证退出密码，返回 true 允许退出，false 拒绝退出并重启进程
+func verifyExitPassword(exePath string) bool {
+	file, err := os.Open(exePath)
+	if err != nil {
+		return true // 无法读取文件时放行，避免死锁
+	}
+	defer file.Close()
+
+	// 🌟 尾部元数据尺寸扩展到了 113 字节
+	footerSize := int64(113)
+	stat, err := file.Stat()
+	if err != nil || stat.Size() < footerSize {
+		return true
+	}
+
+	file.Seek(-footerSize, io.SeekEnd)
+	footer := make([]byte, footerSize)
+	io.ReadFull(file, footer)
+
+	exitVerifyHash := footer[32:64] // 退出密码的哈希位于第 32 到 64 字节
+
+	// 检查是否设置了退出密码（全 0 说明未开启退出密码保护）
+	isZero := true
+	for _, b := range exitVerifyHash {
+		if b != 0 {
+			isZero = false
+			break
+		}
+	}
+	if isZero {
+		return true
+	}
+
+	// 弹出退出密码验证框
+	var dlg *walk.Dialog
+	var pwdTE *walk.LineEdit
+	var pwd string
+
+	_, err = Dialog{
+		AssignTo: &dlg,
+		Title:    "退出安全验证",
+		MinSize:  Size{Width: 320, Height: 120},
+		Layout:   VBox{},
+		Children: []Widget{
+			Label{Text: "程序请求退出，请输入密码以确认关闭:"},
+			LineEdit{
+				AssignTo:     &pwdTE,
+				PasswordMode: true,
+			},
+			PushButton{
+				Text: "🛑 确认退出",
+				OnClicked: func() {
+					pwd = pwdTE.Text()
+					dlg.Accept()
+				},
+			},
+		},
+	}.Run(nil)
+
+	if pwd == "" {
+		return false // 取消或直接关闭窗口，视为验证失败
+	}
+
+	// 计算输入密码的哈希并验证
+	hash := sha256.Sum256([]byte(pwd))
+	hashOfHash := sha256.Sum256(hash[:])
+
+	match := true
+	for i := 0; i < 32; i++ {
+		if hashOfHash[i] != exitVerifyHash[i] {
+			match = false
+			break
+		}
+	}
+
+	if !match {
+		showErrorBox("退出密码错误，程序将被强制重启！")
+		return false
+	}
+
+	return true // 密码正确，允许退出
+}
+
 func extractAndDecrypt(exePath string) ([]byte, error) {
 	file, err := os.Open(exePath)
 	if err != nil {
@@ -93,8 +176,8 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 	}
 	fileSize := stat.Size()
 
-	// 🌟 修复：尾部元数据尺寸扩展到了 81 字节 (新增了 1 字节的标志位)
-	footerSize := int64(81)
+	// 🌟 修复：尾部元数据尺寸扩展到了 113 字节 (新增了 32 字节的退出密码哈希)
+	footerSize := int64(113)
 	if fileSize < footerSize {
 		return nil, fmt.Errorf("no payload")
 	}
@@ -103,14 +186,15 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 	footer := make([]byte, footerSize)
 	io.ReadFull(file, footer)
 
-	if string(footer[73:81]) != "GOSHIELD" {
+	if string(footer[105:113]) != "GOSHIELD" {
 		return nil, fmt.Errorf("magic error")
 	}
 
 	verifyHash := footer[0:32]
-	finalKey := footer[32:64]
-	rememberFlag := footer[64] // 🌟 读取第 64 字节位置的免密标志位
-	payloadSize := binary.LittleEndian.Uint64(footer[65:73])
+	// footer[32:64] 是退出密码哈希，这里不需要用到
+	finalKey := footer[64:96]
+	rememberFlag := footer[96] // 🌟 读取第 96 字节位置的免密标志位
+	payloadSize := binary.LittleEndian.Uint64(footer[97:105])
 
 	if fileSize < footerSize+int64(payloadSize) {
 		return nil, fmt.Errorf("size error")
@@ -225,24 +309,24 @@ func main() {
 		kernel32 := syscall.NewLazyDLL("kernel32.dll")
 		procOpenProcess := kernel32.NewProc("OpenProcess")
 		procWaitForSingleObject := kernel32.NewProc("WaitForSingleObject")
-		procGetExitCodeProcess := kernel32.NewProc("GetExitCodeProcess")
 		procCloseHandle := kernel32.NewProc("CloseHandle")
 
 		for {
 			hProcess, _, _ := procOpenProcess.Call(0x00100000|0x0400, 0, uintptr(targetPID))
 			if hProcess != 0 {
 				procWaitForSingleObject.Call(hProcess, 0xFFFFFFFF)
-				var exitCode uint32
-				procGetExitCodeProcess.Call(hProcess, uintptr(unsafe.Pointer(&exitCode)))
 				procCloseHandle.Call(hProcess)
 
-				if exitCode == 0 {
+				// 🌟 核心修改：无论程序是正常点击 X 退出，还是被恶意强制结束，
+				// 都必须经过密码验证。验证通过才跳出循环（真正结束保镖进程）。
+				if verifyExitPassword(originalExe) {
 					break
 				}
 			}
 
 			time.Sleep(1 * time.Second)
 
+			// 验证失败，程序往下走，执行复活逻辑
 			decryptedPayload, err := extractAndDecrypt(originalExe)
 			if err != nil {
 				break
