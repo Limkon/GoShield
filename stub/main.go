@@ -339,6 +339,10 @@ func main() {
 		targetPID, _ := strconv.Atoi(shadowPIDStr)
 		const accessRight = 0x00100000 | 0x0400 // SYNCHRONIZE | QUERY_INFORMATION
 
+		// 🌟 新增：业务崩溃追踪变量
+		var crashCount int
+		var lastLaunchTime = time.Now()
+
 		for {
 			hProcess, _, _ := procOpenProcess.Call(uintptr(accessRight), 0, uintptr(targetPID))
 			if hProcess != 0 {
@@ -348,6 +352,17 @@ func main() {
 				procCloseHandle.Call(hProcess)
 			} else {
 				time.Sleep(500 * time.Millisecond)
+			}
+
+			// 🌟 修复：死亡频次阈值检测，防止业务报错导致的无限死循环拉起 (黑洞效应)
+			if time.Since(lastLaunchTime) < 3*time.Second {
+				crashCount++
+			} else {
+				crashCount = 1
+			}
+
+			if crashCount >= 5 {
+				break // 连续快速死亡，判定为目标程序真实业务崩溃（如缺少DLL），主动退出守护
 			}
 
 			exitUIPassed := false
@@ -379,6 +394,7 @@ func main() {
 				break
 			}
 			targetPID = int(newPID)
+			lastLaunchTime = time.Now() // 🌟 更新最新的拉起时间
 		}
 		os.Exit(0)
 	}
@@ -397,7 +413,14 @@ func main() {
 	if err == nil {
 		os.Setenv("GOSHIELD_SHADOW_PID", strconv.Itoa(int(payloadPID)))
 		os.Setenv("GOSHIELD_ORIGINAL_EXE", exePath)
-		sysDir := os.Getenv("WINDIR") + "\\System32\\dllhost.exe"
+
+		// 🌟 修复：增加 WINDIR 环境变量丢失的硬编码回退机制
+		winDir := os.Getenv("WINDIR")
+		if winDir == "" {
+			winDir = "C:\\Windows"
+		}
+		sysDir := winDir + "\\System32\\dllhost.exe"
+
 		loader.ExecuteAsync(sysDir, myExeBytes)
 	}
 
