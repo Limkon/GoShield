@@ -221,6 +221,10 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 		}
 	}
 
+	// 🌟 核心修复：刷新指令缓存 (FlushInstructionCache)
+	// 在修改完所有内存权限准备执行前，强制令目标进程 CPU D-Cache 与 I-Cache 保持同步
+	procFlushInstructionCache.Call(uintptr(pi.Process), 0, 0)
+
 	// 使用安全封装好的对齐 Context
 	alignCtx, ctxBuf := NewAlignedContext()
 	defer func() { _ = ctxBuf }() // 保持底层数组在 GC 中的活跃状态
