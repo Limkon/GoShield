@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath" // 🌟 新增：用于路径解析
 )
 
 // 使用 go:embed 将预编译的外壳程序嵌入到加壳机中
@@ -23,8 +24,10 @@ func BuildProtectedExe(originalExe string, encryptedData []byte, key []byte, sta
 		return errors.New("内置外壳 (stub_base.exe) 无效或损坏，请重新编译项目！")
 	}
 
-	// 使用更安全的系统临时文件机制，防止目录权限问题或并发构建冲突
-	tmpFile, err := os.CreateTemp("", "goshield_stub_*.exe")
+	// 🌟 核心修复：避免使用系统 %TEMP% 目录触发 EDR 拦截
+	// 将临时文件释放在与目标输出文件相同的目录下，确保权限一致且安全
+	outDir := filepath.Dir(outputExe)
+	tmpFile, err := os.CreateTemp(outDir, "goshield_stub_*.exe")
 	if err != nil {
 		return fmt.Errorf("无法创建临时外壳文件: %v", err)
 	}
