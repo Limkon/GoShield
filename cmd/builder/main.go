@@ -21,7 +21,7 @@ func appendLog(logTE *walk.TextEdit, msg string) {
 func main() {
 	var mw *walk.MainWindow
 	var inTE, outTE, pwdTE, confirmPwdTE *walk.LineEdit
-	var exitPwdTE, confirmExitPwdTE *walk.LineEdit // 🌟 新增：退出密码与确认退出密码输入框
+	var exitPwdTE, confirmExitPwdTE *walk.LineEdit
 	var rememberCB *walk.CheckBox
 	var logTE *walk.TextEdit
 	var pb *walk.ProgressBar
@@ -29,8 +29,8 @@ func main() {
 
 	err := MainWindow{
 		AssignTo: &mw,
-		Title:    "GoShield",
-		MinSize:  Size{Width: 300, Height: 380}, // 🌟 调高高度以适应新增的密码框
+		Title:    "GoShield - 流式加密版", // 🌟 彰显底层架构升级
+		MinSize:  Size{Width: 300, Height: 380},
 		Size:     Size{Width: 600, Height: 380},
 		Layout:   VBox{},
 		Children: []Widget{
@@ -67,7 +67,6 @@ func main() {
 						},
 					},
 
-					// 启动密码保护选项配置区
 					Label{Text: "启动密码:"},
 					LineEdit{AssignTo: &pwdTE, PasswordMode: true},
 					CheckBox{
@@ -78,16 +77,15 @@ func main() {
 
 					Label{Text: "确认启动:"},
 					LineEdit{AssignTo: &confirmPwdTE, PasswordMode: true},
-					Label{Text: "(留空则无启动密码)"}, // 提示占位符
+					Label{Text: "(留空则无启动密码)"},
 
-					// 🌟 新增：退出密码保护配置区
 					Label{Text: "退出密码:"},
 					LineEdit{AssignTo: &exitPwdTE, PasswordMode: true},
-					Label{Text: ""}, // 留空占位，保持 Grid 三列对齐
+					Label{Text: ""},
 
 					Label{Text: "确认退出:"},
 					LineEdit{AssignTo: &confirmExitPwdTE, PasswordMode: true},
-					Label{Text: "(留空则无退出密码)"}, // 提示占位符
+					Label{Text: "(留空则无退出密码)"},
 				},
 			},
 			Label{Text: "加壳与混淆进度:"},
@@ -109,8 +107,8 @@ func main() {
 					outFile := outTE.Text()
 					password := pwdTE.Text()
 					confirmPassword := confirmPwdTE.Text()
-					exitPassword := exitPwdTE.Text()               // 获取退出密码
-					confirmExitPassword := confirmExitPwdTE.Text() // 获取确认退出密码
+					exitPassword := exitPwdTE.Text()
+					confirmExitPassword := confirmExitPwdTE.Text()
 					rememberPwd := rememberCB.Checked()
 
 					if inFile == "" || outFile == "" {
@@ -118,7 +116,6 @@ func main() {
 						return
 					}
 
-					// 严谨的二次密码核对逻辑：启动密码
 					if password != confirmPassword {
 						walk.MsgBox(mw, "错误", "两次输入的启动密码不一致，请重新输入！", walk.MsgBoxIconError)
 						pwdTE.SetText("")
@@ -126,7 +123,6 @@ func main() {
 						return
 					}
 
-					// 🌟 新增：严谨的二次密码核对逻辑：退出密码
 					if exitPassword != confirmExitPassword {
 						walk.MsgBox(mw, "错误", "两次输入的退出密码不一致，请重新输入！", walk.MsgBoxIconError)
 						exitPwdTE.SetText("")
@@ -134,15 +130,14 @@ func main() {
 						return
 					}
 
-					fileInfo, err := os.Stat(inFile)
+					_, err := os.Stat(inFile)
 					if err != nil {
 						walk.MsgBox(mw, "错误", "无法读取输入文件状态！", walk.MsgBoxIconError)
 						return
 					}
-					if fileInfo.Size() > 500*1024*1024 {
-						walk.MsgBox(mw, "警告", "目标文件过大（超过 500MB），一次性载入内存可能导致崩溃，请重新选择！", walk.MsgBoxIconWarning)
-						return
-					}
+					
+					// 🌟 核心优化：删除了 fileInfo.Size() > 500MB 的拦截！
+					// 得益于流式加密，现在可以无限制处理任何大小的文件。
 
 					runBtn.SetEnabled(false)
 					logTE.SetText("")
@@ -151,17 +146,8 @@ func main() {
 					go func() {
 						defer mw.Synchronize(func() { runBtn.SetEnabled(true) })
 
-						appendLog(logTE, "[*] 读取原始可执行文件...")
-						mw.Synchronize(func() { pb.SetValue(10) })
-						plaintext, err := os.ReadFile(inFile)
-						if err != nil {
-							appendLog(logTE, fmt.Sprintf("[-] 失败: %v", err))
-							mw.Synchronize(func() { pb.SetValue(0) })
-							return
-						}
-
 						appendLog(logTE, "[*] 动态生成 256-bit AES 混淆密钥...")
-						mw.Synchronize(func() { pb.SetValue(30) })
+						mw.Synchronize(func() { pb.SetValue(20) })
 						key, err := crypto.GenerateRandomKey()
 						if err != nil {
 							appendLog(logTE, fmt.Sprintf("[-] 失败: %v", err))
@@ -169,20 +155,12 @@ func main() {
 							return
 						}
 
-						appendLog(logTE, "[*] 执行 AES-GCM 高级加密引擎...")
+						// 🌟 核心优化：删除了读入整个文件到内存和全量加密的步骤
+						appendLog(logTE, "[*] 正在执行无损图标注入与流式 AES-GCM 核心加密引擎...")
 						mw.Synchronize(func() { pb.SetValue(50) })
-						ciphertext, err := crypto.Encrypt(plaintext, key)
-						if err != nil {
-							appendLog(logTE, fmt.Sprintf("[-] 失败: %v", err))
-							mw.Synchronize(func() { pb.SetValue(0) })
-							return
-						}
-
-						appendLog(logTE, "[*] 正在执行无损图标注入与预编译壳拼接...")
-						mw.Synchronize(func() { pb.SetValue(70) })
 						
-						// 🌟 修改：传入新增的 exitPassword 参数
-						err = compiler.BuildProtectedExe(inFile, ciphertext, key, password, exitPassword, rememberPwd, outFile)
+						// 将原始文件路径直接丢给底层，进行边读、边加密、边写的 Zero-Copy 操作
+						err = compiler.BuildProtectedExe(inFile, key, password, exitPassword, rememberPwd, outFile)
 						if err != nil {
 							appendLog(logTE, fmt.Sprintf("[-] 编译失败: %v", err))
 							mw.Synchronize(func() { pb.SetValue(0) })
