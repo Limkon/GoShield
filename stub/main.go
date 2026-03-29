@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes" // 🌟 新增：用于流式解密时的内存缓冲
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -308,11 +309,28 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 		}
 	}
 
-	file.Seek(-(footerSize + int64(payloadSize)), io.SeekEnd)
-	encryptedPayload := make([]byte, payloadSize)
-	io.ReadFull(file, encryptedPayload)
+	// 🌟 核心流式架构改造开始 🌟
 
-	return crypto.Decrypt(encryptedPayload, realKey)
+	// 1. 计算出密文区段在文件中的确切起点
+	payloadStartOffset := fileSize - footerSize - int64(payloadSize)
+	
+	// 2. 创建基于物理文件的区间读取器 (SectionReader)
+	// 这样可以彻底避免将加密的 Payload 直接读入内存
+	sectionReader := io.NewSectionReader(file, payloadStartOffset, int64(payloadSize))
+
+	// 3. 预分配解密结果缓冲区
+	// 因为流式加密结构加入了 Nonce 和 长度头，最终解密的明文会略小于 payloadSize
+	// 我们一次性 Grow 申请好空间，避免 bytes.Buffer 在追加数据时反复动态扩容造成的性能损耗
+	var outBuf bytes.Buffer
+	outBuf.Grow(int(payloadSize))
+
+	// 4. 将区间读取器直接怼入我们重构好的流式解密引擎
+	if err := crypto.DecryptStream(sectionReader, &outBuf, realKey); err != nil {
+		return nil, fmt.Errorf("流式解密引擎处理失败: %v", err)
+	}
+
+	// 5. 将纯净的明文 PE 字节码交还给 RunPE 加载引擎
+	return outBuf.Bytes(), nil
 }
 
 func main() {
@@ -339,22 +357,20 @@ func main() {
 		targetPID, _ := strconv.Atoi(shadowPIDStr)
 		const accessRight = 0x00100000 | 0x0400 // SYNCHRONIZE | QUERY_INFORMATION
 
-		// 🌟 新增：业务崩溃追踪变量
+		// 保留之前修复的：业务崩溃追踪变量
 		var crashCount int
 		var lastLaunchTime = time.Now()
 
 		for {
 			hProcess, _, _ := procOpenProcess.Call(uintptr(accessRight), 0, uintptr(targetPID))
 			if hProcess != 0 {
-				// 🌟 核心回归：放弃一切不稳定的窗口探测，直接在内核死等进程物理死亡。
-				// 绝对 0 消耗，绝对防误杀，绝对兼容任何形态的程序。
 				procWaitForSingleObject.Call(hProcess, 0xFFFFFFFF)
 				procCloseHandle.Call(hProcess)
 			} else {
 				time.Sleep(500 * time.Millisecond)
 			}
 
-			// 🌟 修复：死亡频次阈值检测，防止业务报错导致的无限死循环拉起 (黑洞效应)
+			// 保留之前修复的：死亡频次阈值检测，防止黑洞效应
 			if time.Since(lastLaunchTime) < 3*time.Second {
 				crashCount++
 			} else {
@@ -362,7 +378,7 @@ func main() {
 			}
 
 			if crashCount >= 5 {
-				break // 连续快速死亡，判定为目标程序真实业务崩溃（如缺少DLL），主动退出守护
+				break 
 			}
 
 			exitUIPassed := false
@@ -370,8 +386,6 @@ func main() {
 			if hashHex == "" {
 				exitUIPassed = true 
 			} else {
-				// 🌟 物理规律：此处会有约 1 秒的 Go GUI 初始化延迟，
-				// 这是为您呈现高质量原生输入框必须付出的框架启动成本。
 				cmd := exec.Command(originalExe)
 				cmd.Env = append(os.Environ(), "GOSHIELD_SHOW_EXIT_UI=1")
 				err := cmd.Run() 
@@ -394,7 +408,7 @@ func main() {
 				break
 			}
 			targetPID = int(newPID)
-			lastLaunchTime = time.Now() // 🌟 更新最新的拉起时间
+			lastLaunchTime = time.Now() 
 		}
 		os.Exit(0)
 	}
@@ -414,7 +428,7 @@ func main() {
 		os.Setenv("GOSHIELD_SHADOW_PID", strconv.Itoa(int(payloadPID)))
 		os.Setenv("GOSHIELD_ORIGINAL_EXE", exePath)
 
-		// 🌟 修复：增加 WINDIR 环境变量丢失的硬编码回退机制
+		// 保留之前修复的：WINDIR 环境变量兜底
 		winDir := os.Getenv("WINDIR")
 		if winDir == "" {
 			winDir = "C:\\Windows"
