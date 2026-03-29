@@ -9,6 +9,8 @@ import (
 // --- Windows API 常量与结构体精确对齐定义 ---
 const (
 	PROCESS_TERMINATE           = 0x0001
+	PROCESS_CREATE_THREAD       = 0x0002     // 🌟 新增：防止远程线程注入 (CreateRemoteThread)
+	PROCESS_VM_WRITE            = 0x0020     // 🌟 新增：防止跨进程写内存 (WriteProcessMemory)
 	WRITE_DAC                   = 0x00040000 // 修改安全描述符权限
 	WRITE_OWNER                 = 0x00080000 // 修改所有者权限
 	DACL_SECURITY_INFORMATION   = 0x00000004
@@ -86,9 +88,9 @@ func ProtectProcessByHandle(handle syscall.Handle) {
 
 	// 3. 构造显式访问规则
 	var ea EXPLICIT_ACCESS_W
-	// 🌟 终极修复：同时剥夺 "结束进程"、"修改安全权限"、"修改所有者" 的权限
-	// Win11 任务管理器将彻底失去扒掉这层护甲的能力
-	ea.grfAccessPermissions = PROCESS_TERMINATE | WRITE_DAC | WRITE_OWNER
+	// 🌟 终极修复：同时剥夺 "结束进程"、"修改安全权限"、"修改所有者"、"创建远程线程" 和 "写入虚拟内存" 的权限
+	// 彻底封死任务管理器以及常规内存注入工具的干涉能力
+	ea.grfAccessPermissions = PROCESS_TERMINATE | WRITE_DAC | WRITE_OWNER | PROCESS_CREATE_THREAD | PROCESS_VM_WRITE
 	ea.grfAccessMode = DENY_ACCESS
 	ea.grfInheritance = NO_INHERITANCE
 	ea.Trustee.TrusteeForm = TRUSTEE_IS_SID
