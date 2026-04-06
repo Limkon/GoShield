@@ -11,7 +11,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Limkon/GoShield/internal/crypto" // 🌟 新增：引入 crypto 包进行流式调用
+	"github.com/Limkon/GoShield/internal/crypto" // 🌟 引入 crypto 包进行流式调用
 )
 
 // 使用 go:embed 将预编译的外壳程序嵌入到加壳机中
@@ -19,7 +19,7 @@ import (
 //go:embed stub_base.exe
 var stubBase []byte
 
-// 🌟 新增：countingWriter 用于在流式写入过程中精准统计写入的字节数
+// countingWriter 用于在流式写入过程中精准统计写入的字节数
 type countingWriter struct {
 	w io.Writer
 	n uint64
@@ -32,18 +32,24 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 }
 
 // BuildProtectedExe 核心构建调度 (流式加密版)
-// 🌟 修复：移除 encryptedData []byte 参数，摒弃内存驻留模式
 func BuildProtectedExe(originalExe string, key []byte, startupPwd string, exitPwd string, rememberPwd bool, outputExe string) error {
 	// 校验 stubBase 是否合法
 	if len(stubBase) < 1024 {
 		return errors.New("内置外壳 (stub_base.exe) 无效或损坏，请重新编译项目！")
 	}
 
-	// 避免使用系统 %TEMP% 目录触发 EDR 拦截
 	outDir := filepath.Dir(outputExe)
+	
+	// 🌟 修复：智能降级容错机制 (Fallback)
+	// 优先尝试在目标输出目录创建临时外壳（避免使用系统 %TEMP% 目录触发部分敏感 EDR 拦截）
 	tmpFile, err := os.CreateTemp(outDir, "goshield_stub_*.exe")
 	if err != nil {
-		return fmt.Errorf("无法创建临时外壳文件: %v", err)
+		// 如果在目标目录创建失败（通常是因为 UAC 权限不足，例如输出到 C:\Program Files\）
+		// 则智能降级，尝试使用系统默认临时目录
+		tmpFile, err = os.CreateTemp(os.TempDir(), "goshield_stub_*.exe")
+		if err != nil {
+			return fmt.Errorf("无法创建临时外壳文件 (目录权限不足且降级失败): %v", err)
+		}
 	}
 	tmpExe := tmpFile.Name()
 	
@@ -78,7 +84,7 @@ func BuildProtectedExe(originalExe string, key []byte, startupPwd string, exitPw
 		return fmt.Errorf("写入外壳基础数据失败: %v", err)
 	}
 
-	// 6. 🌟 核心修改：执行流式加密并直接落盘 (Zero-Copy 概念)
+	// 6. 执行流式加密并直接落盘 (Zero-Copy 概念)
 	origFile, err := os.Open(originalExe)
 	if err != nil {
 		return fmt.Errorf("无法打开原始程序进行加密: %v", err)
@@ -145,7 +151,7 @@ func BuildProtectedExe(originalExe string, key []byte, startupPwd string, exitPw
 		return fmt.Errorf("写入免密标志位失败: %v", err)
 	}
 
-	// 🌟 写入刚才通过 countingWriter 精准获取的动态 Payload 长度
+	// 写入刚才通过 countingWriter 精准获取的动态 Payload 长度
 	sizeBuf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(sizeBuf, payloadSize)
 	if _, err := file.Write(sizeBuf); err != nil {
