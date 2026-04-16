@@ -104,6 +104,7 @@ func askPassword() string {
 	return pwd
 }
 
+// 🌟 核心升级：程序锁拦截验证逻辑
 func verifyExitPassword() bool {
 	hashHex := os.Getenv("GOSHIELD_EXIT_HASH")
 	if hashHex == "" {
@@ -121,18 +122,18 @@ func verifyExitPassword() bool {
 
 	err = MainWindow{
 		AssignTo: &mw,
-		Title:    "退出安全验证",
-		MinSize:  Size{Width: 320, Height: 120},
-		Size:     Size{Width: 320, Height: 120},
+		Title:    "GoShield 程序锁验证",
+		MinSize:  Size{Width: 350, Height: 130},
+		Size:     Size{Width: 350, Height: 130},
 		Layout:   VBox{},
 		Children: []Widget{
-			Label{Text: "程序请求退出，请输入密码以确认关闭:"},
+			Label{Text: "🛡️ 系统拦截到对主程序的敏感操作 (尝试终止/关闭)。\n请输入【程序锁密码】以授权执行此操作:"},
 			LineEdit{
 				AssignTo:     &pwdTE,
 				PasswordMode: true,
 			},
 			PushButton{
-				Text: "🛑 确认退出",
+				Text: "🔓 验证密码并授权",
 				OnClicked: func() {
 					pwd = pwdTE.Text()
 					mw.Close()
@@ -148,10 +149,11 @@ func verifyExitPassword() bool {
 	var rect struct{ Left, Top, Right, Bottom int32 }
 	procSystemParametersInfoW.Call(0x0030, 0, uintptr(unsafe.Pointer(&rect)), 0)
 
-	x := int(rect.Right) - 320 - 15
-	y := int(rect.Bottom) - 120 - 15
+	// 动态计算居右下角坐标
+	x := int(rect.Right) - 350 - 15
+	y := int(rect.Bottom) - 130 - 15
 
-	mw.SetBounds(walk.Rectangle{X: x, Y: y, Width: 320, Height: 120})
+	mw.SetBounds(walk.Rectangle{X: x, Y: y, Width: 350, Height: 130})
 	procSetWindowPos.Call(uintptr(mw.Handle()), ^uintptr(0), uintptr(x), uintptr(y), 0, 0, 0x0041)
 
 	mw.Run()
@@ -172,7 +174,7 @@ func verifyExitPassword() bool {
 	}
 
 	if !match {
-		showErrorBox("密码错误")
+		showErrorBox("程序锁密码错误，非法操作已被拒绝并拦截！")
 		return false
 	}
 
