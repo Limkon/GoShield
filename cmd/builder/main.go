@@ -79,13 +79,13 @@ func main() {
 					LineEdit{AssignTo: &confirmPwdTE, PasswordMode: true},
 					Label{Text: "(留空则无启动密码)"},
 
-					Label{Text: "退出密码:"},
+					Label{Text: "程序锁密码:"},
 					LineEdit{AssignTo: &exitPwdTE, PasswordMode: true},
-					Label{Text: ""},
+					Label{Text: "拦截所有外部结束/退出操作"},
 
-					Label{Text: "确认退出:"},
+					Label{Text: "确认程序锁:"},
 					LineEdit{AssignTo: &confirmExitPwdTE, PasswordMode: true},
-					Label{Text: "(留空则无退出密码)"},
+					Label{Text: "(留空则无程序锁)"},
 				},
 			},
 			Label{Text: "加壳与混淆进度:"},
@@ -124,7 +124,7 @@ func main() {
 					}
 
 					if exitPassword != confirmExitPassword {
-						walk.MsgBox(mw, "错误", "两次输入的退出密码不一致，请重新输入！", walk.MsgBoxIconError)
+						walk.MsgBox(mw, "错误", "两次输入的程序锁密码不一致，请重新输入！", walk.MsgBoxIconError)
 						exitPwdTE.SetText("")
 						confirmExitPwdTE.SetText("")
 						return
